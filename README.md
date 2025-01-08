@@ -1,5 +1,11 @@
 
-<img width="1100" height="400" alt="image" src="https://github.com/user-attachments/assets/43fae364-5510-4bbb-9fdd-7f869aabf98f" />
+[![License](http://img.shields.io/:license-apache-blue.svg)](http://www.apache.org/licenses/LICENSE-2.0.html)
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/actuator/pSlip)](https://github.com/actuator/pSlip/releases)
+[![GitHub stars](https://img.shields.io/github/stars/actuator/pSlip)](https://github.com/actuator/pSlip/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/actuator/pSlip)](https://github.com/actuator/pSlip/network/members)
+[![GitHub contributors](https://img.shields.io/github/contributors/actuator/pSlip)](https://github.com/actuator/pSlip/graphs/contributors)
+
+<img src="https://github.com/user-attachments/assets/53ff5d6f-c036-4f91-b993-84d0972a04b0">
 
 ## Overview
 
@@ -10,10 +16,12 @@ This occurs when an application is leveraged into performing actions on behalf o
 ## Features
 
 - Parses APK files to extract manifest information.
-- Searches for exported components handling dangerous intents.
-- Provides example ADB commands to test identified activities.
+- Hardcoded AES keys and IVs in the application code.
 - Displays all permissions requested by the application.
-- Scans for hardcoded AES keys and IVs in the application code.
+- Provides example ADB commands to test identified activities.
+- Exported activities that handle `android.intent.action.CALL` intents.
+- Exported activities or activity-aliases with intent filters that have the `javascript` scheme.
+- Exported activities intent with intent filters that require potentially vulnerable permissions that are set to a 'normal' or weak permission-level. 
 
 ## Dependencies
 
@@ -23,19 +31,18 @@ This occurs when an application is leveraged into performing actions on behalf o
 
 ## How It Works
 
-By examining the application's manifest and identifying exported activities that can handle specific intents, **Permission_Slip** helps pinpoint areas where the app might be susceptible to such attacks. This enables security researchers and developers to identify and mitigate these vulnerabilities.
+By examining the application's manifest and identifying exported activities that can handle specific intents, **pSlip** helps pinpoint areas where the app might be susceptible to such attacks. This enables security researchers and developers to identify and mitigate these vulnerabilities.
 
-<img src="https://github.com/user-attachments/assets/0771775e-cda0-4e89-9be6-9a4574a0f42f">
+## Installation
 
-## pSlip.py
-
-`pSlip.py` parses APK files to extract their manifest information. It searches for:
-
-- Exported activities that handle `android.intent.action.CALL` intents.
-- Exported activities or activity-aliases with intent filters that have the `javascript` scheme.
-- Hardcoded AES keys and IVs in the application code.
-
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/actuator/pSlip.git
+   cd pSlip
+   
 ## Usage
+
+<img src="https://github.com/user-attachments/assets/b19fb71f-46ae-4eaf-bd0b-8aceb882317d">
 
 The script supports the following flags:
 
@@ -52,23 +59,25 @@ The script supports the following flags:
 To analyze a single APK file:
 
 ```bash
-python pSlip.py path/to/your.apk -all
+python pSlip.py path/to/your.apk -js -call -html report.htm
 ```
 
 To analyze all APK files in a directory:
 
 ```bash
-python pSlip.py path/to/directory -all
+python pSlip.py path/to/directory -all -html report.htm
 ```
 
-Once potential vulnerabilities are detected, the tool generates an example ADB command to test the identified components.
-
-**Note:** This project is a work in progress (WIP) and is currently under development.
+Once potential vulnerabilities are detected, the pSlip generates POC ADB commands to test the identified components when applicable.
 
 It is important to note that this tool relies on parsing the Android manifest for intent filter entries, whose presence or absence may not be indicative of exploitability.
 
 ## Contributing
+Pull requests are welcome, however for major changes please open an issue first to discuss what you would like to change.
 
-If you'd like to contribute please fork the repository, make your changes & submit a pull request. I appreciate any contributions that improve the functionality and usability of the tool.
+I appreciate any contributions that improve the functionality and usability of the tool.
 
----
+
+
+
+
