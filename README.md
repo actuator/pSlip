@@ -31,7 +31,9 @@ This occurs when an application is leveraged into performing actions on behalf o
 
 ## How It Works
 
-By examining the application's manifest and identifying exported activities that can handle specific intents, **pSlip** helps pinpoint areas where the app might be susceptible to such attacks. This enables security researchers and developers to identify and mitigate these vulnerabilities.
+By examining the application's manifest and identifying exported activities that can handle specific intents, **pSlip** helps pinpoint areas where the app might be susceptible to such attacks. 
+
+This enables security researchers and developers to identify and mitigate these vulnerabilities.
 
 ## Installation
 
