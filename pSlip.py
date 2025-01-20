@@ -7,11 +7,11 @@ import re
 import zipfile
 import multiprocessing
 from multiprocessing import Pool
-from tqdm import tqdm 
+from tqdm import tqdm
 from datetime import datetime
 import xml.etree.ElementTree as ET
 import platform
-import shutil  
+import shutil
 
 RESET = "\033[0m"
 YELLOW = "\033[93m"
@@ -21,15 +21,15 @@ RED = "\033[91m"
 BOLD = "\033[1m"
 
 BANNER = f"""
-{YELLOW}                                                                                                                                                                                                                                                                                                                       
+{YELLOW}
 ██████╗ ███████╗██╗     ██╗██████╗ 
 ██╔══██╗██╔════╝██║     ██║██╔══██╗
 ██████╔╝███████╗██║     ██║██████╔╝
 ██╔═══╝ ╚════██║██║     ██║██╔═══╝ 
 ██║     ███████║███████╗██║██║     
-╚═╝     ╚══════╝╚══════╝╚═╝╚═╝                                                                                                                                                                                                                                                                                                                                                                                                                         
+╚═╝     ╚══════╝╚═╝╚═╝                                                  
 {RESET}{BOLD}
-Version 1.0.0 | Github.com/Actuator/pSlip
+Version 1.0.1 | Github.com/Actuator/pSlip
 {RESET}
 """
 
@@ -92,13 +92,17 @@ def get_package_name(manifest_root):
         return None
 
 def is_exported(component, target_sdk_version):
+    """
+    Checks 'android:exported' status. If not explicitly set and targetSdkVersion < 31,
+    returns True if there's an <intent-filter>.
+    """
     android_ns = 'http://schemas.android.com/apk/res/android'
     exported = component.get(f'{{{android_ns}}}exported')
     if exported is not None:
         return exported.lower() == 'true'
     else:
-        # for targetSdkVersion <31, exported is implicitly true if intent-filter is present
-        # for targetSdkVersion >=31, exported must be explicitly set; implicit is False
+        # For targetSdkVersion <31, exported is implicitly true if there's any intent-filter
+        # For >=31, must be explicitly set; otherwise default is false
         if target_sdk_version is not None and target_sdk_version < 31:
             has_intent_filter = component.find('intent-filter') is not None
             return has_intent_filter
@@ -106,16 +110,36 @@ def is_exported(component, target_sdk_version):
             return False
 
 def format_component_name(package_name, component_name):
+    """
+    returns a string like:
+      - 'com.example.app/.MainActivity' if component_name = '.MainActivity'
+      - 'com.example.app/SomeActivity'  if it's not dotted
+    """
     if component_name.startswith('.'):
         return f"{package_name}{component_name}"
     return f"{package_name}/{component_name}"
 
+def collect_real_activities_export_status(application, package_name, target_sdk_version):
+    """
+    build a map of real <activity> fully-qualified names -> bool exported.
+    this helps us verify if the underlying activity of an <activity-alias> is also exported.
+    """
+    android_ns = 'http://schemas.android.com/apk/res/android'
+    activity_map = {}
+    for act in application.findall('activity'):
+        act_name = act.get(f'{{{android_ns}}}name')
+        if not act_name:
+            continue
+        fq_name = format_component_name(package_name, act_name)
+        activity_map[fq_name] = is_exported(act, target_sdk_version)
+    return activity_map
+
 def find_dangerous_components(manifest_file, target_sdk_version, check_js, check_call):
     """
-    Parse the manifest file for exported components:
-      - If check_js is True, check for scheme='javascript' or mimeType='text/javascript'.
-      - If check_call is True, look for 'android.intent.action.CALL' or 'CALL_PRIVILEGED'.
-      - Additionally, detect http/https with no or wildcard host.
+    parse the manifest for exported components, with special handling for <activity-alias>.
+       If check_js=True, checks for scheme='javascript' or mimeType='text/javascript'.
+       If check_call=True, looks for 'android.intent.action.CALL' or 'CALL_PRIVILEGED'.
+       Also flags http/https with empty/wildcard host.
     """
     dangerous_components = {}
     try:
@@ -123,10 +147,16 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
         root = tree.getroot()
         android_ns = 'http://schemas.android.com/apk/res/android'
         ET.register_namespace('android', android_ns)
+
         package_name = get_package_name(root)
         application = root.find('application')
         if application is None:
             return dangerous_components
+
+        # collect export status of  target activity 
+        real_activities_map = collect_real_activities_export_status(
+            application, package_name, target_sdk_version
+        )
 
         component_types = ['activity', 'activity-alias', 'service', 'receiver']
         for component_type in component_types:
@@ -136,34 +166,54 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                 if component_name is None:
                     continue
 
-              
-                exported = is_exported(component, target_sdk_version)
+         
+                # both the alias AND its underlying activity must be exported
+                if component_type == 'activity-alias':
+                    alias_is_exp = is_exported(component, target_sdk_version)
+                    target_name = component.get(f'{{{android_ns}}}targetActivity')
+                    if target_name is None:
+                        continue
+
+                    # construct the same format used in real_activities_map
+                    fq_target_name = format_component_name(package_name, target_name)
+                    underlying_is_exp = real_activities_map.get(fq_target_name, False)
+
+                    if not (alias_is_exp and underlying_is_exp):
+                        continue  # skip
+
+                    
+                    exported = True
+                else:
+                    # for normal <activity>, <service>, <receiver>
+                    exported = is_exported(component, target_sdk_version)
+
                 if not exported:
                     continue
 
+                
                 intent_filters = component.findall('intent-filter')
                 for intent_filter in intent_filters:
                     actions = intent_filter.findall('action')
                     data_elements = intent_filter.findall('data')
-                    
+
                     is_call_vulnerable = False
                     is_js_vulnerable = False
                     is_http_open_vulnerable = False
 
-                 
+                    # Check for CALL
                     if check_call:
                         for action in actions:
                             action_name = action.get(f'{{{android_ns}}}name')
-                            if action_name in ['android.intent.action.CALL', 'android.intent.action.CALL_PRIVILEGED']:
+                            if action_name in ['android.intent.action.CALL',
+                                               'android.intent.action.CALL_PRIVILEGED']:
                                 is_call_vulnerable = True
                                 break
 
-                   
+                    # Check for JavaScript scheme or MIME
                     if check_js:
                         for data_tag in data_elements:
                             scheme = data_tag.get(f'{{{android_ns}}}scheme')
                             mime_type = data_tag.get(f'{{{android_ns}}}mimeType')
-
                             if scheme and scheme.lower() == 'javascript':
                                 is_js_vulnerable = True
                                 break
@@ -171,15 +221,16 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                                 is_js_vulnerable = True
                                 break
 
-                    # http/https with missing/wildcard host
+                    # Check for "http"/"https" with missing host
                     for data_tag in data_elements:
                         scheme = data_tag.get(f'{{{android_ns}}}scheme')
                         host = data_tag.get(f'{{{android_ns}}}host')
                         if scheme and scheme.lower() in ['http', 'https']:
-                            if host is None or host.strip() == '' or host.strip() == '*':
+                            if not host or host.strip() in ['', '*']:
                                 is_http_open_vulnerable = True
                                 break
 
+                    # If any of the flags are triggered, store the result
                     if any([is_call_vulnerable, is_js_vulnerable, is_http_open_vulnerable]):
                         formatted_name = format_component_name(package_name, component_name)
                         if formatted_name not in dangerous_components:
@@ -189,7 +240,8 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                                 'is_js_vulnerable': False,
                                 'is_http_open_vulnerable': False
                             }
-                        # keep track of each intent filters raw XML for reference
+
+                        # Keep raw XML for reference
                         intent_filter_str = ET.tostring(intent_filter, encoding='unicode')
                         dangerous_components[formatted_name]['intent_filters'].append(intent_filter_str)
 
@@ -228,15 +280,13 @@ def find_permissions(manifest_file, apk_name, collect_vulnerabilities, package_n
             name = perm.get(ns('name'))
             protectionLevel = perm.get(ns('protectionLevel'))
 
-            #  record name in permissions list
+            # record name
             if name:
                 permissions.append(name)
 
-            # if protectionLevel is normal or not set then add to our normal_protection_permissions list
+            # if protectionLevel is normal or not set, add to normal_protection_permissions
             if protectionLevel is None or protectionLevel == 'normal':
                 normal_protection_permissions.append(name)
-
-              
 
     except Exception as e:
         print(f"{RED}Error: An unexpected error occurred while reading permissions: {e}{RESET}")
@@ -245,9 +295,9 @@ def find_permissions(manifest_file, apk_name, collect_vulnerabilities, package_n
     return permissions, new_vulnerabilities, normal_protection_permissions
 
 def find_components_requiring_permissions(manifest_file, target_sdk_version, permissions_list, package_name):
-    
-    # look for exported components that require a specific permission
-   
+    """
+    Look for exported components that require a permission (with normal or no protection level).
+    """
     components_requiring_permissions = []
     try:
         tree = ET.parse(manifest_file)
@@ -259,8 +309,8 @@ def find_components_requiring_permissions(manifest_file, target_sdk_version, per
 
         component_types = ['activity', 'activity-alias', 'service', 'receiver', 'provider']
         for component_type in component_types:
-            components = application.findall(component_type)
-            for component in components:
+            comps = application.findall(component_type)
+            for component in comps:
                 component_name = component.get(f'{{{android_ns}}}name')
                 if component_name is None:
                     continue
@@ -295,9 +345,7 @@ def is_valid_apk(apk_file):
         return False
 
 def generate_adb_command(package_name, component_name):
-    """
-    Build an ADB command for CALL-based vulnerabilities.
-    """
+    """Build an ADB command for CALL-based vulnerabilities."""
     return (
         f"adb shell am start "
         f"-a android.intent.action.CALL "
@@ -306,9 +354,7 @@ def generate_adb_command(package_name, component_name):
     )
 
 def generate_js_adb_command(package_name, component_name):
-    """
-    Build an ADB command for JS-based vulnerabilities.
-    """
+    """Build an ADB command for JS-based vulnerabilities."""
     return (
         f"adb shell am start "
         f"-a android.intent.action.VIEW "
@@ -333,21 +379,20 @@ def decompile_and_find_aes_keys(apk_file, package_name):
         )
     except subprocess.CalledProcessError as e:
         error_output = e.stderr.decode()
-        print(f"{RED}Error: Failed to decompile APK with JADX'{apk_file}':\n{error_output}{RESET}")
+        print(f"{RED}Error: Failed to decompile APK with JADX '{apk_file}':\n{error_output}{RESET}")
         return vulnerabilities
     except Exception as e:
         print(f"{RED}Error: An unexpected error occurred during decompilation of '{apk_file}': {e}{RESET}")
         return vulnerabilities
 
-  
-    found_aes_keys = []
-    found_ivs = []
-    found_des_keys = []
-
+    # Regex patterns for AES keys, IV, DES keys, etc.
     aes_key_pattern = re.compile(r'SecretKeySpec\(\s*["\']([A-Za-z0-9+/=]{16,32})["\']\.getBytes')
     iv_pattern = re.compile(r'IvParameterSpec\(\s*["\']([A-Za-z0-9+/=]{16,32})["\']\.getBytes')
     des_key_pattern = re.compile(r'SecretKeySpec\(\s*["\']([A-Za-z0-9+/=]{8})["\']\.getBytes')
 
+    found_aes_keys = []
+    found_ivs = []
+    found_des_keys = []
 
     for root_dir, dirs, files in os.walk(base_dir):
         for file in files:
@@ -356,43 +401,37 @@ def decompile_and_find_aes_keys(apk_file, package_name):
                 try:
                     with open(java_file, 'r', encoding='utf-8') as f:
                         code = f.read()
-
-                        # check for AES keys
+                  
                         keys_found = aes_key_pattern.findall(code)
-                        for key in keys_found:
+                        for key_val in keys_found:
                             found_aes_keys.append({
-                                'key': key,
+                                'key': key_val,
                                 'java_file': java_file
                             })
-
-                        # check for IVs
+                     
                         ivs_found = iv_pattern.findall(code)
-                        for iv in ivs_found:
+                        for iv_val in ivs_found:
                             found_ivs.append({
-                                'iv': iv,
+                                'iv': iv_val,
                                 'java_file': java_file
                             })
-
-                        # Check for DES keys
+                        
                         des_found = des_key_pattern.findall(code)
-                        for dk in des_found:
+                        for dk_val in des_found:
                             found_des_keys.append({
-                                'key': dk,
+                                'key': dk_val,
                                 'java_file': java_file
                             })
-
-                        # handle the byte array patterns 
-
                 except Exception as e:
                     print(f"{RED}Error reading file {java_file}: {e}{RESET}")
 
-    # cleanup
+
     try:
         subprocess.run(['rm', '-rf', base_dir], check=True)
     except subprocess.CalledProcessError as e:
         print(f"{RED}Error cleaning up decompiled files: {e}{RESET}")
 
-    # build vulnerabilities from lists
+    
     for item in found_aes_keys:
         file_name = os.path.basename(item['java_file'])
         vulnerabilities.append({
@@ -402,7 +441,6 @@ def decompile_and_find_aes_keys(apk_file, package_name):
             'Details': f"AES Key: {item['key']}",
             'ADB Command': 'N/A'
         })
-
     for item in found_ivs:
         file_name = os.path.basename(item['java_file'])
         vulnerabilities.append({
@@ -412,7 +450,6 @@ def decompile_and_find_aes_keys(apk_file, package_name):
             'Details': f"IV: {item['iv']}",
             'ADB Command': 'N/A'
         })
-
     for item in found_des_keys:
         file_name = os.path.basename(item['java_file'])
         vulnerabilities.append({
@@ -424,26 +461,6 @@ def decompile_and_find_aes_keys(apk_file, package_name):
         })
 
     return vulnerabilities
-
-
-def process_byte_array_string(byte_array_str):
-    """
-    Convert a string of byte values (e.g. "0x41, 0x42, 65") to a hex string.
-    """
-    try:
-        byte_array_str = byte_array_str.replace(' ', '')
-        byte_values = byte_array_str.split(',')
-        byte_list = []
-        for val in byte_values:
-            if val.startswith('0x') or val.startswith('0X'):
-                byte_list.append(int(val, 16))
-            else:
-                byte_list.append(int(val))
-        key_bytes = bytes(byte_list)
-        return key_bytes.hex()
-    except Exception as e:
-        print(f"{RED}Error processing byte array string '{byte_array_str}': {e}{RESET}")
-        return None
 
 def analyze_apk(args):
     """
@@ -475,25 +492,23 @@ def analyze_apk(args):
 
     package_name = get_package_name(root)
 
-    # find potentially vulnerable components in manifest
+   
     dangerous_components = find_dangerous_components(
         manifest_file, target_sdk_version, check_js, check_call
     )
 
-    # build vulnerability list from discovered components
+    
     for component_name, comp_data in dangerous_components.items():
-       
         if comp_data['is_call_vulnerable'] and check_call:
             adb_cmd = generate_adb_command(package_name, component_name)
             vulnerabilities.append({
-                'package_name': package_name,   
+                'package_name': package_name,
                 'Component': component_name,
                 'Issue Type': 'Exposed CALL Permission',
                 'Details': 'Potential outbound dialing permission vulnerability',
                 'ADB Command': adb_cmd
             })
 
-      
         if comp_data['is_js_vulnerable'] and check_js:
             adb_cmd = generate_js_adb_command(package_name, component_name)
             vulnerabilities.append({
@@ -504,9 +519,8 @@ def analyze_apk(args):
                 'ADB Command': adb_cmd
             })
 
-      
         if comp_data['is_http_open_vulnerable']:
-            #if not also flagged for JS, produce both a malicious URL and a JS fallback
+           
             if not comp_data['is_js_vulnerable']:
                 cmd_http = (
                     f"adb shell am start "
@@ -521,13 +535,13 @@ def analyze_apk(args):
                     'Component': component_name,
                     'Issue Type': 'URL Redirect',
                     'Details': (
-                        "Exported component with http/https in intent-filter but lacking an explicit JavaScript scheme."
+                        "Exported component with http/https in intent-filter but lacking an explicit JavaScript scheme. "
                         "Test for both URL redirect and JS injection."
                     ),
                     'ADB Command': combined_cmd
                 })
             else:
-                # if it was also flagged as JS, just show malicious URL
+              
                 cmd_http = (
                     f"adb shell am start "
                     f"-a android.intent.action.VIEW "
@@ -538,19 +552,18 @@ def analyze_apk(args):
                     'package_name': package_name,
                     'Component': component_name,
                     'Issue Type': 'URL Redirect',
-                    'Details': "Exported component that may allow arbitrary URL's to be loaded",
+                    'Details': "Exported component that may allow arbitrary URLs to be loaded",
                     'ADB Command': cmd_http
                 })
 
-    # permissions / custom permission vulnerabilities
+   
     apk_name = os.path.basename(apk_file)
     perms_found, new_vulns, normal_protection_permissions = find_permissions(
         manifest_file, apk_name, collect_permission_vulns, package_name
     )
 
-    # if we had any new custom permission vulns add them
+  
     if new_vulns:
-        # make sure each new vuln also references the package_name
         for nv in new_vulns:
             nv['package_name'] = package_name
         vulnerabilities.extend(new_vulns)
@@ -558,7 +571,7 @@ def analyze_apk(args):
     if perms_found:
         permissions = perms_found
 
-    #  for components that require weak permissions:
+   
     if collect_permission_vulns and normal_protection_permissions:
         comps_req_perms = find_components_requiring_permissions(
             manifest_file, target_sdk_version, normal_protection_permissions, package_name
@@ -575,7 +588,7 @@ def analyze_apk(args):
                 'ADB Command': 'N/A'
             })
 
-    # cleanup extracted manifest files
+   
     try:
         subprocess.run(['rm', '-rf', base_dir], check=True)
     except subprocess.CalledProcessError as e:
@@ -585,27 +598,23 @@ def analyze_apk(args):
 
 def display_vulnerabilities_table(vulnerabilities):
     """
-    Group vulnerabilities by the actual 'package_name' field
-    and print them in a more readable list format.
+    Group vulnerabilities by 'package_name' and print them in a neat list.
     """
     if not vulnerabilities:
         print(f"{GREEN}None of the selected vulnerabilities were found.{RESET}")
         return
 
-    # Group by 'package_name' (the real package from the manifest)
     grouped_by_package = {}
     for vuln in vulnerabilities:
         pkg = vuln.get('package_name', 'N/A')
         if pkg not in grouped_by_package:
             grouped_by_package[pkg] = []
         grouped_by_package[pkg].append(vuln)
-    print("-" * 80)
 
-    # print vulnerabilities for each package
+    print("-" * 80)
     for pkg_name, vuln_list in grouped_by_package.items():
         print(f"{BOLD}Package: {RESET}{CYAN}{pkg_name}{RESET}")
         print("-" * 80)
-
         for vuln in vuln_list:
             comp_full = vuln.get('Component', 'N/A')
             print(f"{BOLD}Component:  {RESET}{CYAN}{comp_full}{RESET}")
@@ -615,17 +624,12 @@ def display_vulnerabilities_table(vulnerabilities):
             adb_command = vuln.get('ADB Command', 'N/A')
             if adb_command != 'N/A':
                 print(f"{BOLD}ADB Command:{RESET}")
-                # use extra indentation for multi-line commands
                 for line in adb_command.split("\n"):
                     print(f"   {YELLOW}{line}{RESET}")
-
             print("-" * 80)
 
 def generate_html_report(vulnerabilities, permissions, output_file):
-    """
-    Generates an HTML report of vulnerabilities and permissions, grouped by the real package_name.
-    """
-    # group vulnerabilities by package_name
+  
     grouped_by_package = {}
     for v in vulnerabilities:
         pkg = v.get('package_name', 'N/A')
@@ -646,11 +650,11 @@ def generate_html_report(vulnerabilities, permissions, output_file):
         body {{
             background-color: #ffffff;
             font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
-            color: #1c1e21; /* Typical text color */
+            color: #1c1e21;
             margin: 20px;
         }}
         header {{
-            background-color: #4267B2; /* FB-like Blue */
+            background-color: #4267B2;
             padding: 20px;
             color: #fff;
             margin-bottom: 20px;
@@ -687,7 +691,7 @@ def generate_html_report(vulnerabilities, permissions, output_file):
             vertical-align: top;
         }}
         th {{
-            background-color: #f0f2f5; /* Light gray/blue */
+            background-color: #f0f2f5;
             color: #050505;
         }}
         tr:nth-child(even) {{
@@ -696,7 +700,6 @@ def generate_html_report(vulnerabilities, permissions, output_file):
         tr:nth-child(odd) {{
             background-color: #ffffff;
         }}
-        /* Ensure multiline commands display on separate lines */
         .adb-command {{
             white-space: pre-wrap;
         }}
@@ -716,11 +719,9 @@ def generate_html_report(vulnerabilities, permissions, output_file):
             <h2>Vulnerabilities</h2>
 """
 
-    
     if not vulnerabilities:
         html_content += "<p>No vulnerabilities found.</p>"
     else:
-        # for each package print a separate table
         for pkg_name, vuln_list in grouped_by_package.items():
             html_content += f"""
             <h3 class="package-title">Package: {pkg_name}</h3>
@@ -732,7 +733,6 @@ def generate_html_report(vulnerabilities, permissions, output_file):
                 </tr>
             """
             for v in vuln_list:
-                # convert multi-line ADB commands to <br/>
                 adb_command = v.get('ADB Command', 'N/A')
                 adb_command_html = ""
                 if adb_command != "N/A":
@@ -759,7 +759,6 @@ def generate_html_report(vulnerabilities, permissions, output_file):
 
     html_content += "</div>"
 
-   
     if permissions:
         html_content += """
         <div class="permissions">
@@ -779,7 +778,6 @@ def generate_html_report(vulnerabilities, permissions, output_file):
 </html>
 """
 
-    # write the HTML file
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(html_content)
@@ -788,7 +786,7 @@ def generate_html_report(vulnerabilities, permissions, output_file):
         print(f"{RED}Error: Failed to write HTML report to '{output_file}': {e}{RESET}")
 
 def main():
-    global check_aes  
+    global check_aes
     start_time = datetime.now()
     if len(sys.argv) < 2:
         print_help()
@@ -829,7 +827,7 @@ def main():
             check_aes = True
             collect_permission_vulns = True
         elif option == '-allsafe':
-            # same as -all but skip AES detection
+    
             check_js = True
             check_call = True
             collect_permission_vulns = True
@@ -846,11 +844,11 @@ def main():
             print_help()
             sys.exit(1)
 
-    # If listing permissions we also want to collect permission vulnerabilities
+
     if list_permissions_flag:
         collect_permission_vulns = True
 
-    # build the list of APK paths to analyze
+
     apk_paths = []
     if os.path.isfile(argument) and argument.endswith('.apk'):
         apk_paths.append(argument)
@@ -882,7 +880,7 @@ def main():
     all_permissions_dict = {}
     package_names_for_apks = {}
 
-    # analyze each APK in parallel
+    
     with Pool(pool_size) as pool:
         results_list = list(
             tqdm(pool.imap_unordered(analyze_apk, pool_args),
@@ -890,7 +888,7 @@ def main():
                  desc="Processing APKs")
         )
 
-    # collect final results
+
     for result in results_list:
         apk_file, vulnerabilities, perms, package_name = result
         if vulnerabilities:
@@ -900,7 +898,7 @@ def main():
         if package_name:
             package_names_for_apks[apk_file] = package_name
 
-  
+   
     if check_aes:
         print(f"\n{BOLD}Starting AES key extraction...{RESET}\n")
         for apk_file in tqdm(apk_paths, desc="Analyzing for AES keys"):
@@ -930,7 +928,6 @@ def main():
             print()
 
     print(f"\n{BOLD}Total Execution Time:{RESET} {total_time}")
-
 
 if __name__ == "__main__":
     main()
