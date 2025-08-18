@@ -5,6 +5,7 @@ import os
 import textwrap
 import re
 import zipfile
+import csv
 import multiprocessing
 from multiprocessing import Pool
 from tqdm import tqdm
@@ -29,7 +30,7 @@ BANNER = f"""
 ██║     ███████║███████╗██║██║     
 ╚═╝     ╚══════╝╚═╝╚═╝                                                  
 {RESET}{BOLD}
-Version 1.0.1 | Github.com/Actuator/pSlip
+Version 1.0.2 | Github.com/Actuator/pSlip
 {RESET}
 """
 
@@ -45,6 +46,8 @@ def print_help():
         -js               Scan for explicit JavaScript injection vulnerabilities
         -call             Scan for components with exposed CALL permissions
         -aes              Scan for hardcoded AES/DES keys and IVs
+        -taptrap          Scan for tapjacking risk (obscured touch defenses)
+        -csv <file>       Output the vulnerability details to a CSV file
         -all              Scan for all of the vulnerabilities listed above
         -allsafe          Skip AES/DES key detection for faster scans and mitigate decompilation issues
         -html <file>      Output the vulnerability details to an HTML file
@@ -462,7 +465,7 @@ def decompile_and_find_aes_keys(apk_file, package_name):
 
     return vulnerabilities
 
-def analyze_apk(args):
+def analyze_apk_original(args):
     """
     Extract, parse, and analyze a single APK for vulnerabilities and permissions.
     Returns (apk_file, vulnerabilities, permissions, package_name).
@@ -628,142 +631,118 @@ def display_vulnerabilities_table(vulnerabilities):
                     print(f"   {YELLOW}{line}{RESET}")
             print("-" * 80)
 
+
 def generate_html_report(vulnerabilities, permissions, output_file):
-  
     grouped_by_package = {}
     for v in vulnerabilities:
         pkg = v.get('package_name', 'N/A')
-        if pkg not in grouped_by_package:
-            grouped_by_package[pkg] = []
-        grouped_by_package[pkg].append(v)
+        grouped_by_package.setdefault(pkg, []).append(v)
 
-    html_content = f"""<!DOCTYPE html>
+    html_content = """<!DOCTYPE html>
 <html>
 <head>
     <title>pSlip Vulnerability Report</title>
     <style>
-        /* Basic reset */
-        * {{
-            margin: 0;
-            padding: 0;
-        }}
-        body {{
-            background-color: #ffffff;
-            font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
-            color: #1c1e21;
-            margin: 20px;
-        }}
-        header {{
-            background-color: #4267B2;
-            padding: 20px;
-            color: #fff;
-            margin-bottom: 20px;
-        }}
-        header h1 {{
-            margin: 0;
-            font-size: 28px;
-        }}
-        .container {{
-            width: 90%;
-            margin: 0 auto;
-        }}
-        .vulnerabilities, .permissions {{
-            background-color: #ffffff;
-            margin-bottom: 40px;
-            padding: 15px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }}
-        .vulnerabilities h2, .permissions h2 {{
-            color: #4267B2;
-            margin-top: 0;
-        }}
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin-bottom: 20px;
-            border: 1px solid #ddd;
-        }}
-        th, td {{
-            border: 1px solid #ddd;
-            text-align: left;
-            padding: 8px;
-            vertical-align: top;
-        }}
-        th {{
-            background-color: #f0f2f5;
-            color: #050505;
-        }}
-        tr:nth-child(even) {{
-            background-color: #f7f7f7;
-        }}
-        tr:nth-child(odd) {{
-            background-color: #ffffff;
-        }}
-        .adb-command {{
-            white-space: pre-wrap;
-        }}
-        h3.package-title {{
-            margin-top: 20px;
-            margin-bottom: 10px;
-        }}
+        * { margin: 0; padding: 0; }
+        body { background:#fff; font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; color:#1c1e21; margin:20px; }
+        header { background:#4267B2; padding:20px; color:#fff; margin-bottom:20px; }
+        header h1 { margin:0; font-size:28px; }
+        .container { width:90%; margin:0 auto; }
+        .vulnerabilities, .permissions { background:#fff; margin-bottom:40px; padding:15px; border:1px solid #ddd; border-radius:4px; }
+        .vulnerabilities h2, .permissions h2 { color:#4267B2; margin-top:0; }
+        table { width:100%; border-collapse:collapse; margin-bottom:20px; border:1px solid #ddd; }
+        th, td { border:1px solid #ddd; text-align:left; padding:8px; vertical-align:top; }
+        th { background:#f0f2f5; color:#050505; }
+        tr:nth-child(even) { background:#f7f7f7; }
+        tr:nth-child(odd) { background:#ffffff; }
+        .adb-command { white-space: pre-wrap; }
+        .pkg-header{margin:12px 0 8px 0;padding:8px 12px;border-left:4px solid #888;background:#fafafa;border-radius:6px;}
+        .pkg-title{font-size:18px;font-weight:600;}
+        .pkg-sub{font-size:14px;margin-top:4px;color:#333}
+        .sev{padding:2px 6px;border-radius:4px;font-weight:600}
+        .sev-high,.sev-critical{background:#fdecea;color:#b71c1c}
+        .sev-medium{background:#fff4e5;color:#8a4500}
+        .sev-low{background:#e8f5e9;color:#1b5e20}
+        .sev-info{background:#e3f2fd;color:#0d47a1}
+        a { text-decoration: none; color: #1a73e8; }
+        a:hover { text-decoration: underline; }
+        .pkg-sub a { font-weight: 600; }
     </style>
 </head>
 <body>
-    <header>
-        <h1>pSlip Vulnerability Report</h1>
-    </header>
+    <header><h1>pSlip Vulnerability Report</h1></header>
     <div class="container">
-        <p>Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-        <div class="vulnerabilities">
-            <h2>Vulnerabilities</h2>
 """
+    from datetime import datetime as _dt
+    html_content += "<p>Generated on: " + _dt.now().strftime('%Y-%m-%d %H:%M:%S') + "</p>"
+    html_content += "<div class='vulnerabilities'><h2>Vulnerabilities</h2>"
+
+    rows = []
+    for pkg, vulns in grouped_by_package.items():
+        R = _taptrap_risk_rollup(vulns)
+        c = R["counts"]
+        rows.append((pkg, R["headline"], R["score"], c["Critical"], c["High"], c["Medium"], c["Low"], c["Info"], c["Total"]))
+    rows.sort(key=lambda r: (_severity_rank(r[1]), -int(r[2]), r[0]))
+
+    html_content += """
+    <div id='portfolio' class='pkg-header'>
+      <div class='pkg-title'>Tapjacking Portfolio</div>
+      <div class='pkg-sub'>One line per app. Shows Tapjacking-only risk.</div>
+    </div>
+    <table>
+      <tr>
+        <th>App (package)</th><th>Tapjacking Risk</th><th>Score</th>
+        <th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Info</th><th>Total</th>
+      </tr>
+    """
+    for pkg, head, score, cC, cH, cM, cL, cI, tot in rows:
+        anch = 'pkg-' + ''.join(ch if (ch.isalnum() or ch in '._-') else '-' for ch in pkg)
+        html_content += (
+            "<tr>"
+            f"<td><a href='#{anch}'>{pkg}</a></td><td>{head}</td><td>{score}</td>"
+            f"<td>{cC}</td><td>{cH}</td><td>{cM}</td><td>{cL}</td><td>{cI}</td><td>{tot}</td>"
+            "</tr>"
+        )
+    html_content += "</table><br/>"
 
     if not vulnerabilities:
         html_content += "<p>No vulnerabilities found.</p>"
     else:
         for pkg_name, vuln_list in grouped_by_package.items():
-            html_content += f"""
-            <h3 class="package-title">Package: {pkg_name}</h3>
-            <table>
-                <tr>
-                    <th>Component</th>
-                    <th>Issue Type</th>
-                    <th>Details</th>
-                </tr>
-            """
-            for v in vuln_list:
-                adb_command = v.get('ADB Command', 'N/A')
-                adb_command_html = ""
-                if adb_command != "N/A":
-                    adb_command_html = (
-                        "<br/><strong>ADB Command:</strong><br/>"
-                        f"<span class='adb-command'>{adb_command.replace('\n', '<br/>')}</span>"
-                    )
-
+            R = _taptrap_risk_rollup(vuln_list)
+            counts = R["counts"]
+            anchor_id = 'pkg-' + ''.join(ch if (ch.isalnum() or ch in '._-') else '-' for ch in pkg_name)
+            html_content += (
+                f"<div id='{anchor_id}' class='pkg-header'>"
+                f"<div class='pkg-title'>{pkg_name}</div>"
+                f"<div class='pkg-sub'>Tapjacking Risk: <span class='sev sev-{R['headline'].lower()}'>{R['headline']}</span> (Score: {R['score']}/100)</div>"
+                f"<div class='pkg-sub'>Counts — Critical: {counts['Critical']}  High: {counts['High']}  Medium: {counts['Medium']}  Low: {counts['Low']}  Info: {counts['Info']}  Total: {counts['Total']}</div>"
+                "</div>"
+            )
+            html_content += (
+                "<table>"
+                "<tr><th>Component</th><th>Issue Type</th><th>Severity</th><th>Confidence</th><th>Details</th></tr>"
+            )
+            for v in _sorted_vulns(vuln_list):
+                adb_cmd = v.get('ADB Command', 'N/A') or 'N/A'
+                adb_html = ""
+                if adb_cmd != "N/A":
+                    adb_html = "<br/><strong>ADB Command:</strong><br/><span class='adb-command'>" + adb_cmd.replace("\\n","<br/>") + "</span>"
                 component_full = v.get('Component', 'N/A')
                 issue_type = v.get('Issue Type', 'N/A')
-                details = v.get('Details', 'N/A')
-
-                html_content += f"""
-                <tr>
-                    <td>{component_full}</td>
-                    <td>{issue_type}</td>
-                    <td>
-                        {details}
-                        {adb_command_html}
-                    </td>
-                </tr>
-                """
+                severity = v.get('Severity', '—')
+                confidence = str(v.get('Confidence', ''))
+                details = v.get('Details', 'N/A') or 'N/A'
+                html_content += (
+                    "<tr>"
+                    f"<td>{component_full}</td><td>{issue_type}</td><td>{severity}</td><td>{confidence}</td><td>{details}{adb_html}</td>"
+                    "</tr>"
+                )
             html_content += "</table>"
-
-    html_content += "</div>"
+            html_content += "<div class='pkg-sub' style='margin:8px 0 24px 0;'><a href='#portfolio'>↑ Back to portfolio</a></div>"
 
     if permissions:
-        html_content += """
-        <div class="permissions">
-            <h2>Permissions Summary</h2>
-        """
+        html_content += "<div class='permissions'><h2>Permissions Summary</h2>"
         for apk_file, perms_list in permissions.items():
             apk_name = os.path.basename(apk_file)
             html_content += f"<h3>{apk_name}</h3><ul>"
@@ -772,12 +751,7 @@ def generate_html_report(vulnerabilities, permissions, output_file):
             html_content += "</ul>"
         html_content += "</div>"
 
-    html_content += """
-    </div> <!-- /.container -->
-</body>
-</html>
-"""
-
+    html_content += "</div></body></html>"
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(html_content)
@@ -785,6 +759,414 @@ def generate_html_report(vulnerabilities, permissions, output_file):
     except Exception as e:
         print(f"{RED}Error: Failed to write HTML report to '{output_file}': {e}{RESET}")
 
+def _severity_rank(sev: str) -> int:
+    if not sev:
+        return 99
+    s = (str(sev) or "").strip().lower()
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4, "informational": 4}
+    return order.get(s, 98)
+
+def _sorted_vulns(vulns):
+    def key(v):
+        sev = v.get("Severity", "")
+        conf = v.get("Confidence", 0)
+        try:
+            conf_num = int(conf)
+        except Exception:
+            try:
+                conf_num = int(float(conf))
+            except Exception:
+                conf_num = 0
+        comp = v.get("Component", "") or ""
+        return (_severity_rank(sev), -conf_num, comp.lower())
+    return sorted(vulns, key=key)
+
+def _severity_weight(sev: str) -> int:
+    s = (str(sev) or "").strip().lower()
+    return {"critical":5, "high":4, "medium":3, "low":2, "info":1, "informational":1}.get(s, 1)
+
+def _is_taptrap_issue(v):
+    it = (v.get("Issue Type","") or "").lower()
+    return it.startswith("tapjacking risk")
+
+def _taptrap_risk_rollup(vulns):
+    tv = [v for v in vulns if _is_taptrap_issue(v)]
+    if not tv:
+        return {"headline":"Info","score":0,"counts":{"Critical":0,"High":0,"Medium":0,"Low":0,"Info":0,"Total":0}}
+    counts = {"Critical":0,"High":0,"Medium":0,"Low":0,"Info":0,"Total":0}
+    def norm(sev):
+        s = (sev or "").strip().lower()
+        if s == "critical": return "Critical"
+        if s == "high": return "High"
+        if s == "medium": return "Medium"
+        if s == "low": return "Low"
+        return "Info"
+    base = 0.0
+    headline = "Info"
+    headline_rank = 99
+    for v in tv:
+        sev = norm(v.get("Severity","Info"))
+        counts[sev] += 1
+        counts["Total"] += 1
+        r = _severity_rank(sev)
+        if r < headline_rank:
+            headline_rank = r
+            headline = sev
+        try:
+            conf = float(v.get("Confidence", 0) or 0.0)
+        except Exception:
+            conf = 0.0
+        w = _severity_weight(sev)
+        s = (w/5.0) * conf
+        if s > base:
+            base = s
+    extra_c = max(0, counts["Critical"] - (1 if headline=="Critical" and base>0 else 0))
+    extra_h = max(0, counts["High"] - (1 if headline=="High" and base>0 else 0))
+    extra_m = max(0, counts["Medium"] - (1 if headline=="Medium" and base>0 else 0))
+    extra_l = counts["Low"]
+    bonus = min(10.0, 3.0*extra_c + 2.0*extra_h + 1.0*extra_m + 0.5*extra_l)
+    score = int(max(0.0, min(100.0, base + bonus)))
+    return {"headline": headline, "score": score, "counts": counts}
+
+def generate_csv_report(vulnerabilities, permissions, output_file):
+    try:
+        with open(output_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["package_name","Component","Issue Type","Severity","Confidence","Details","ADB Command"])
+            for v in _sorted_vulns(vulnerabilities):
+                writer.writerow([
+                    v.get('package_name',''),
+                    v.get('Component',''),
+                    v.get('Issue Type',''),
+                    v.get('Severity',''),
+                    v.get('Confidence',''),
+                    (v.get('Details','') or '').replace('\\n',' '),
+                    (v.get('ADB Command','') or '').replace('\\n','; ')
+                ])
+        print(f"{GREEN}CSV report written to {output_file}{RESET}")
+    except Exception as e:
+        print(f"{RED}Error writing CSV: {e}{RESET}")
+
+def generate_csv_taptrap_rollup(vulnerabilities, output_file):
+    try:
+        grouped_by_package = {}
+        for v in vulnerabilities:
+            grouped_by_package.setdefault(v.get('package_name','unknown'), []).append(v)
+        rows = []
+        for pkg, vulns in grouped_by_package.items():
+            R = _taptrap_risk_rollup(vulns)
+            c = R["counts"]
+            rows.append([pkg, R["headline"], R["score"], c["Critical"], c["High"], c["Medium"], c["Low"], c["Info"], c["Total"]])
+        base, ext = os.path.splitext(output_file)
+        out = base + ".taptrap.apps" + (ext if ext else ".csv")
+        with open(out, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["package_name","Tapjacking Risk","Tapjacking Score","Critical","High","Medium","Low","Info","Total"])
+            for row in rows:
+                writer.writerow(row)
+        print(f"{GREEN}Tapjacking CSV portfolio written to {out}{RESET}")
+    except Exception as e:
+        print(f"{RED}Error writing Tapjacking portfolio CSV: {e}{RESET}")
+
+def analyze_apk(args):
+    apk_file, list_permissions_flag, check_js, check_call, collect_permission_vulns, check_taptrap = args
+    _args_original = (apk_file, list_permissions_flag, check_js, check_call, collect_permission_vulns)
+    apk_file, vulnerabilities, permissions, package_name = analyze_apk_original(_args_original)
+    try:
+        if check_taptrap and package_name:
+            base_dir = os.path.splitext(apk_file)[0]
+            tap_vulns = detect_taptrap_layout_risks_with_context(base_dir, package_name, apk_file)
+            if tap_vulns:
+                vulnerabilities.extend(tap_vulns)
+    except Exception as _e:
+        try:
+            print(f"{YELLOW}Warning: TapTrap scan failed: {_e}{RESET}")
+        except Exception:
+            pass
+    return apk_file, vulnerabilities, permissions, package_name
+
+# --- TapTrap detection integration (tuned) ---
+def _android_ns():
+    return 'http://schemas.android.com/apk/res/android'
+
+def _get_android_attr(elem, name):
+    return elem.get(f'{{{_android_ns()}}}{name}')
+
+def _load_strings_map(res_dir):
+    strings = {}
+    if not os.path.isdir(res_dir):
+        return strings
+    for root_dir, _, files in os.walk(res_dir):
+        base = os.path.basename(root_dir)
+        if not base.startswith("values"):
+            continue
+        for f in files:
+            if f != "strings.xml":
+                continue
+            path = os.path.join(root_dir, f)
+            try:
+                tree = ET.parse(path)
+                root = tree.getroot()
+            except Exception:
+                continue
+            for s in root.findall("string"):
+                name = s.get("name")
+                if not name:
+                    continue
+                text = (s.text or "").strip()
+                if not text:
+                    continue
+                strings.setdefault(name, set()).add(text)
+    return strings
+
+def _resolve_text(attr_val, strings_map):
+    if not attr_val:
+        return set()
+    val = attr_val.strip()
+    if val.startswith("@string/"):
+        key = val.split("/",1)[1]
+        return set(strings_map.get(key, []))
+    if val.startswith("@android:string/"):
+        framework = {"ok": {"OK","Ok","Okay"}, "cancel": {"Cancel","CANCEL"}}
+        key = val.split("/",1)[1]
+        return set(framework.get(key, []))
+    return {val}
+
+def _tokenize(s):
+    import re as _re
+    return set(_re.findall(r"[A-Za-z0-9]+", (s or "").lower()))
+
+# Tuned high-risk semantics
+HIGH_RISK_SEMANTIC_TOKENS = {
+    "login","auth","verify","pay","checkout","approve","password","otp","pin",
+    "confirm","secure","submit","card","transfer","send"
+}
+
+SENSITIVE_INPUT_TYPES = {"textpassword","numberpassword","textvisiblepassword","textwebpassword","phone","number"}
+
+def _evidence_for_texts(texts, tokens_set):
+    hits = []
+    for t in texts:
+        toks = _tokenize(t)
+        inter = toks & tokens_set
+        if inter:
+            hits.append(f"text='{t}' hits {sorted(inter)}")
+    return hits
+
+def _is_sensitive_input_elem(elem, strings_map):
+    tag = (elem.tag or '').lower()
+    if not (tag.endswith('edittext') or tag.endswith('textinputedittext')):
+        return (False, [], False, 0)
+    evidence, conf = [], 0
+    it = (_get_android_attr(elem, 'inputType') or '').lower()
+    it_hit = any(w in it for w in SENSITIVE_INPUT_TYPES)
+    if it_hit:
+        evidence.append(f"inputType={it}")
+        conf += 1
+    id_attr = (_get_android_attr(elem, 'id') or '')
+    id_tokens = _tokenize(id_attr)
+    id_hits = id_tokens & HIGH_RISK_SEMANTIC_TOKENS
+    is_high_semantic = bool(id_hits) or it_hit
+    if id_hits:
+        evidence.append(f"id hits {sorted(id_hits)}")
+        conf += 1
+    hints = set()
+    hints |= _resolve_text(_get_android_attr(elem, 'hint'), strings_map)
+    hints |= _resolve_text(_get_android_attr(elem, 'text'), strings_map)
+    ev = _evidence_for_texts(hints, HIGH_RISK_SEMANTIC_TOKENS)
+    if ev:
+        evidence.extend(ev)
+        conf += 1
+        is_high_semantic = True
+    return (bool(evidence), evidence, is_high_semantic, conf)
+
+def _is_sensitive_button_elem(elem, strings_map):
+    tag = (elem.tag or '').lower()
+    clickable = (_get_android_attr(elem, 'clickable') or '').lower() == 'true'
+    is_buttonish = clickable or tag.endswith('button')
+    if not is_buttonish:
+        return (False, [], False, 0)
+    evidence, conf = [], 0
+    texts = set()
+    texts |= _resolve_text(_get_android_attr(elem, 'text'), strings_map)
+    texts |= _resolve_text(_get_android_attr(elem, 'contentDescription'), strings_map)
+    id_attr = (_get_android_attr(elem, 'id') or '')
+    id_tokens = _tokenize(id_attr)
+
+    low_risk = {"help","info","search","back","cancel","close","learn","learnmore","later"}
+    if (set(_tokenize(" ".join(texts))) & low_risk) or (id_tokens & low_risk):
+        return (False, [], False, 0)
+
+    ev_text = _evidence_for_texts(texts, HIGH_RISK_SEMANTIC_TOKENS)
+    if ev_text:
+        evidence.extend(ev_text)
+        conf += 1
+    id_hits = id_tokens & HIGH_RISK_SEMANTIC_TOKENS
+    if id_hits:
+        evidence.append(f"id hits {sorted(id_hits)}")
+        conf += 1
+    is_high_semantic = bool(ev_text or id_hits)
+    return (is_high_semantic, evidence, is_high_semantic, conf)
+
+def _view_identifier(elem, layout_file):
+    vid = _get_android_attr(elem, 'id') or ''
+    tag = (elem.tag or 'View').split('}')[-1]
+    nice_id = vid.split('/')[-1] if '/' in vid else (vid or tag)
+    return f"layout/{os.path.basename(layout_file)}#{nice_id}"
+
+def detect_taptrap_layout_risks(base_dir, package_name):
+    vulnerabilities = []
+    res_dir = os.path.join(base_dir, 'res')
+    strings_map = _load_strings_map(res_dir)
+    if not os.path.isdir(res_dir):
+        return vulnerabilities
+    try:
+        for root_dir, _, files in os.walk(res_dir):
+            if not os.path.basename(root_dir).startswith('layout'):
+                continue
+            for file in files:
+                if not file.endswith('.xml'):
+                    continue
+                layout_path = os.path.join(root_dir, file)
+                try:
+                    tree = ET.parse(layout_path)
+                    lroot = tree.getroot()
+                except Exception:
+                    continue
+                for elem in lroot.iter():
+                    sens1, ev1, high1, c1 = _is_sensitive_input_elem(elem, strings_map)
+                    sens2, ev2, high2, c2 = _is_sensitive_button_elem(elem, strings_map)
+                    if not (sens1 or sens2):
+                        continue
+                    ftwo = (_get_android_attr(elem, 'filterTouchesWhenObscured') or '').lower()
+                    if ftwo == 'true':
+                        continue
+                    comp = _view_identifier(elem, layout_path)
+                    details = ('Sensitive view missing android:filterTouchesWhenObscured="true". '
+                               'Set the attribute or override onFilterTouchEventForSecurity() on this view.')
+                    evidence = "; ".join(ev1 + ev2)
+                    conf = c1 + c2
+                    vuln = {
+                        'package_name': package_name,
+                        'Component': comp,
+                        'Issue Type': 'Tapjacking Risk (Obscured Touches Not Filtered)',
+                        'Details': details + (f" Evidence: {evidence}." if evidence else ""),
+                        'Confidence': conf,
+                        'ADB Command': 'N/A'
+                    }
+                    if high1 or high2:
+                        vuln['__is_high_semantic'] = True
+                    vulnerabilities.append(vuln)
+    except Exception as e:
+        try:
+            print(f"{YELLOW}Warning: TapTrap layout scan failed: {e}{RESET}")
+        except Exception:
+            pass
+    return vulnerabilities
+
+def _scan_apk_for_taptrap_mitigations(apk_path):
+    sigs = {
+        "onFilterTouchEventForSecurity": False,
+        "getFlags_bitcheck": False,
+        "setFilterTouchesWhenObscured_true": False,
+        "flag_secure_addFlags": False,
+        "compose_ui_present": False,
+        "compose_sensitive_widgets": False,
+    }
+    try:
+        with zipfile.ZipFile(apk_path, 'r') as zf:
+            for member in [m for m in zf.namelist() if m.endswith('.dex')]:
+                data = zf.read(member)
+                def bfind(s): 
+                    try:
+                        return s.encode('utf-8') in data
+                    except Exception:
+                        return False
+                if bfind('onFilterTouchEventForSecurity') or bfind('onFilterTouchEventForSecurity(Landroid/view/MotionEvent;)Z'):
+                    sigs["onFilterTouchEventForSecurity"] = True
+                if bfind('Landroid/view/MotionEvent;->getFlags()I') or bfind('FLAG_WINDOW_IS_OBSCURED') or bfind('FLAG_WINDOW_IS_PARTIALLY_OBSCURED'):
+                    sigs["getFlags_bitcheck"] = True
+                if bfind('Landroid/view/View;->setFilterTouchesWhenObscured(Z)V'):
+                    sigs["setFilterTouchesWhenObscured_true"] = True
+                if bfind('Landroid/view/Window;->addFlags(I)V') and (b'0x2000' in data or b'8192' in data or b'FLAG_SECURE' in data):
+                    sigs["flag_secure_addFlags"] = True
+                if bfind('Landroidx/compose'):
+                    sigs["compose_ui_present"] = True
+                if (bfind('Landroidx/compose/material/TextField') or 
+                    bfind('Landroidx/compose/material3/TextField') or 
+                    bfind('PasswordVisualTransformation') or 
+                    bfind('OutlinedTextField')):
+                    sigs["compose_sensitive_widgets"] = True
+    except Exception as e:
+        try:
+            print(f"{YELLOW}Warning: dex scan failed: {e}{RESET}")
+        except Exception:
+            pass
+    sigs["any_mitigation"] = any([
+        sigs["onFilterTouchEventForSecurity"],
+        sigs["getFlags_bitcheck"],
+        sigs["setFilterTouchesWhenObscured_true"],
+        sigs["flag_secure_addFlags"],
+    ])
+    return sigs
+
+def _classify_severity_tuned(is_high_semantic, mitigated):
+    # If code-level mitigations detected, treat as Info.
+    if mitigated:
+        return "Info"
+    # High only when semantics indicate sensitive actions/inputs
+    if is_high_semantic:
+        return "High"
+    # Everything else -> Info (to reduce noise)
+    return "Info"
+
+def _confidence_score(evidence_count:int, is_high_semantic:bool, mitigated:bool, compose_only:bool=False) -> int:
+    if compose_only:
+        base = 35  # conservative for compose-only without semantics
+    else:
+        if evidence_count <= 0:
+            base = 20
+        elif evidence_count == 1:
+            base = 35
+        elif evidence_count == 2:
+            base = 60
+        else:
+            base = 85
+    if is_high_semantic:
+        base += 10
+    if mitigated:
+        base -= 35
+    return max(5, min(99, int(base)))
+
+def detect_taptrap_layout_risks_with_context(base_dir, package_name, apk_path):
+    results = []
+    sigs = _scan_apk_for_taptrap_mitigations(apk_path)
+    xml_findings = detect_taptrap_layout_risks(base_dir, package_name)
+    mitigated = sigs.get("any_mitigation", False)
+
+    for v in xml_findings:
+        v2 = dict(v)
+        is_high = v2.pop('__is_high_semantic', False)
+        evidence_count = int(v2.pop('Confidence', 0) or 0)
+        v2["Severity"] = _classify_severity_tuned(is_high, mitigated)
+        v2["Confidence"] = _confidence_score(evidence_count, is_high, mitigated, compose_only=False)
+        if mitigated and "Mitigations detected in code" not in v2["Details"]:
+            v2["Details"] += " Mitigations detected in code; confirm critical views are covered."
+        results.append(v2)
+
+    # Compose heuristic: if compose present but no mitigations and no XML controls found, add Info row
+    if (sigs.get("compose_ui_present") and sigs.get("compose_sensitive_widgets") and not mitigated and not xml_findings):
+        results.append({
+            'package_name': package_name,
+            'Component': 'compose/*',
+            'Issue Type': 'Tapjacking Risk (Compose UI, no obscured-touch defenses found)',
+            'Details': 'Compose TextField/Password visuals detected but no obscured-touch filtering in code; protect container or host view.',
+            'Severity': 'Info',
+            'Confidence': _confidence_score(1, False, False, compose_only=True),
+            'ADB Command': 'N/A'
+        })
+    return results
+# --- End TapTrap integration ---
 def main():
     global check_aes
     start_time = datetime.now()
@@ -801,6 +1183,9 @@ def main():
     check_js = False
     check_call = False
     check_aes = False
+    check_taptrap = False
+    html_output = None
+    csv_output = None
     collect_permission_vulns = False
     html_output = None
 
@@ -819,6 +1204,8 @@ def main():
             check_call = True
         elif option == '-aes':
             check_aes = True
+        elif option == '-taptrap':
+            check_taptrap = True
         elif option == '-perm':
             collect_permission_vulns = True
         elif option == '-all':
@@ -826,11 +1213,28 @@ def main():
             check_call = True
             check_aes = True
             collect_permission_vulns = True
+            check_taptrap = True
         elif option == '-allsafe':
     
             check_js = True
             check_call = True
             collect_permission_vulns = True
+            check_taptrap = True
+            check_taptrap = True
+        elif option == '-csv':
+            if i + 1 < len(options):
+                csv_output = options[i + 1]
+                skip_next = True
+            else:
+                print(f"{RED}Error: '-csv' flag requires an output file name.{RESET}")
+                print_help()
+                sys.exit(1)
+        elif option == '-allsafe':
+    
+            check_js = True
+            check_call = True
+            collect_permission_vulns = True
+            check_taptrap = True
         elif option == '-html':
             if i + 1 < len(options):
                 html_output = options[i + 1]
@@ -869,7 +1273,7 @@ def main():
 
     print(BANNER)
     pool_args = [
-        (apk_file, list_permissions_flag, check_js, check_call, collect_permission_vulns)
+        (apk_file, list_permissions_flag, check_js, check_call, collect_permission_vulns, check_taptrap)
         for apk_file in apk_paths
     ]
 
@@ -918,6 +1322,12 @@ def main():
     if html_output:
         print(f"\n{BOLD}Generating HTML report...{RESET}\n")
         generate_html_report(all_vulnerabilities, all_permissions_dict, html_output)
+
+    if csv_output:
+        print(f"\n{BOLD}Generating CSV report...{RESET}\n")
+        generate_csv_report(all_vulnerabilities, all_permissions_dict, csv_output)
+        # Tapjacking-only portfolio CSV
+        generate_csv_taptrap_rollup(all_vulnerabilities, csv_output)
 
     if list_permissions_flag:
         print(f"\n{BOLD}Permissions Summary:{RESET}\n")
