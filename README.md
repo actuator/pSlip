@@ -44,7 +44,8 @@ This enables security researchers and developers to identify and mitigate these 
    
 ## Usage
 
-<img src="https://github.com/user-attachments/assets/b19fb71f-46ae-4eaf-bd0b-8aceb882317d">
+
+<img src="https://github.com/user-attachments/assets/2a78ecdd-b9c7-43a0-bc8c-52fcb1b2484f"/>
 
 The script supports the following flags:
 
