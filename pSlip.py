@@ -30,7 +30,7 @@ BANNER = f"""
 ██║     ███████║███████╗██║██║     
 ╚═╝     ╚══════╝╚═╝╚═╝                                                  
 {RESET}{BOLD}
-Version 1.0.3 | Github.com/Actuator/pSlip
+Version 1.0.4 | Github.com/Actuator/pSlip
 {RESET}
 """
 
@@ -958,9 +958,8 @@ def generate_html_report(vulnerabilities, permissions, output_file):
     rows.sort(key=lambda r: (_severity_rank(r[1]), -int(r[2]), r[0]))
 
     html_content += """
-    <div id='portfolio' class='pkg-header'>
-      <div class='pkg-title'>Tapjacking Portfolio</div>
-      <div class='pkg-sub'>One line per app. Shows Tapjacking-only risk.</div>
+    <div id='Risk' class='pkg-header'>
+      <div class='pkg-title'>Tapjacking Risk</div>
     </div>
     <table>
       <tr>
@@ -1012,7 +1011,7 @@ def generate_html_report(vulnerabilities, permissions, output_file):
                     "</tr>"
                 )
             html_content += "</table>"
-            html_content += "<div class='pkg-sub' style='margin:8px 0 24px 0;'><a href='#portfolio'>↑ Back to portfolio</a></div>"
+            html_content += "<div class='pkg-sub' style='margin:8px 0 24px 0;'><a href='#Risk'>↑ Back to Risk</a></div>"
 
     if permissions:
         html_content += "<div class='permissions'><h2>Permissions Summary</h2>"
@@ -1137,9 +1136,9 @@ def generate_csv_taptrap_rollup(vulnerabilities, output_file):
             writer.writerow(["package_name","Tapjacking Risk","Tapjacking Score","Critical","High","Medium","Low","Info","Total"])
             for row in rows:
                 writer.writerow(row)
-        print(f"{GREEN}Tapjacking CSV portfolio written to {out}{RESET}")
+        print(f"{GREEN}Tapjacking CSV Risk written to {out}{RESET}")
     except Exception as e:
-        print(f"{RED}Error writing Tapjacking portfolio CSV: {e}{RESET}")
+        print(f"{RED}Error writing Tapjacking Risk CSV: {e}{RESET}")
 
 def analyze_apk(args):
     apk_file, list_permissions_flag, check_js, check_call, collect_permission_vulns, check_taptrap = args
