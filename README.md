@@ -44,7 +44,8 @@ sudo apt install apktool jadx
 
 ## Usage
 
-<img src="https://github.com/user-attachments/assets/defe300c-5ec4-4906-9a9c-67d4d58f352f" />
+<img src="https://github.com/user-attachments/assets/1848ca30-e48e-47e5-86be-3e4ff901c03b" />
+
 
 ```bash
 # Directory sweep
@@ -60,7 +61,7 @@ python pSlip.py path/to/apks -allsafe -html report.htm
 
 ## Tapjacking Signals
 
-<img alt="image" src="https://github.com/user-attachments/assets/94426bce-e3cd-4e57-a1a4-ec2fd69b7eef" />
+<img width="1216" height="545" alt="image" src="https://github.com/user-attachments/assets/ae41a7b5-93b3-4d8d-ac83-701f877bb3bd" />
 
 
 * **High** when UI semantics match:
