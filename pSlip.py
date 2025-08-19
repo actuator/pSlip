@@ -30,7 +30,7 @@ BANNER = f"""
 ██║     ███████║███████╗██║██║     
 ╚═╝     ╚══════╝╚═╝╚═╝                                                  
 {RESET}{BOLD}
-Version 1.0.2 | Github.com/Actuator/pSlip
+Version 1.0.3 | Github.com/Actuator/pSlip
 {RESET}
 """
 
@@ -169,7 +169,6 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                 if component_name is None:
                     continue
 
-         
                 # both the alias AND its underlying activity must be exported
                 if component_type == 'activity-alias':
                     alias_is_exp = is_exported(component, target_sdk_version)
@@ -184,7 +183,6 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                     if not (alias_is_exp and underlying_is_exp):
                         continue  # skip
 
-                    
                     exported = True
                 else:
                     # for normal <activity>, <service>, <receiver>
@@ -193,7 +191,6 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                 if not exported:
                     continue
 
-                
                 intent_filters = component.findall('intent-filter')
                 for intent_filter in intent_filters:
                     actions = intent_filter.findall('action')
@@ -365,105 +362,390 @@ def generate_js_adb_command(package_name, component_name):
         f"-n {package_name}/{component_name.split('/')[-1]}"
     )
 
+# ----------------- FIXED & RESILIENT AES/IV EXTRACTION -----------------
 def decompile_and_find_aes_keys(apk_file, package_name):
-    if "_JAVA_OPTIONS" in os.environ:
-        del os.environ["_JAVA_OPTIONS"]
+    """
+    Resilient AES/IV extraction:
+    - Tolerant to non-zero JADX exit if sources were produced.
+    - Fallback to apktool + smali scanning if Java sources missing or no findings.
+    - Supports keys/IVs via Base64, "str".getBytes(), new byte[]{...}, hex strings, and smali array-data.
+    """
+    import base64
 
     vulnerabilities = []
     apk_file_abs = os.path.abspath(apk_file)
     base_dir = os.path.splitext(apk_file_abs)[0] + "_jadx"
 
-    try:
-        if os.path.exists(base_dir):
-            subprocess.run(['rm', '-rf', base_dir], check=True)
-        subprocess.run(
-            ['jadx', '-d', base_dir, apk_file_abs],
-            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-    except subprocess.CalledProcessError as e:
-        error_output = e.stderr.decode()
-        print(f"{RED}Error: Failed to decompile APK with JADX '{apk_file}':\n{error_output}{RESET}")
-        return vulnerabilities
-    except Exception as e:
-        print(f"{RED}Error: An unexpected error occurred during decompilation of '{apk_file}': {e}{RESET}")
-        return vulnerabilities
-
-    # Regex patterns for AES keys, IV, DES keys, etc.
-    aes_key_pattern = re.compile(r'SecretKeySpec\(\s*["\']([A-Za-z0-9+/=]{16,32})["\']\.getBytes')
-    iv_pattern = re.compile(r'IvParameterSpec\(\s*["\']([A-Za-z0-9+/=]{16,32})["\']\.getBytes')
-    des_key_pattern = re.compile(r'SecretKeySpec\(\s*["\']([A-Za-z0-9+/=]{8})["\']\.getBytes')
-
-    found_aes_keys = []
-    found_ivs = []
-    found_des_keys = []
-
-    for root_dir, dirs, files in os.walk(base_dir):
-        for file in files:
-            if file.endswith('.java'):
-                java_file = os.path.join(root_dir, file)
-                try:
-                    with open(java_file, 'r', encoding='utf-8') as f:
-                        code = f.read()
-                  
-                        keys_found = aes_key_pattern.findall(code)
-                        for key_val in keys_found:
-                            found_aes_keys.append({
-                                'key': key_val,
-                                'java_file': java_file
-                            })
-                     
-                        ivs_found = iv_pattern.findall(code)
-                        for iv_val in ivs_found:
-                            found_ivs.append({
-                                'iv': iv_val,
-                                'java_file': java_file
-                            })
-                        
-                        des_found = des_key_pattern.findall(code)
-                        for dk_val in des_found:
-                            found_des_keys.append({
-                                'key': dk_val,
-                                'java_file': java_file
-                            })
-                except Exception as e:
-                    print(f"{RED}Error reading file {java_file}: {e}{RESET}")
-
-
-    try:
-        subprocess.run(['rm', '-rf', base_dir], check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"{RED}Error cleaning up decompiled files: {e}{RESET}")
-
-    
-    for item in found_aes_keys:
-        file_name = os.path.basename(item['java_file'])
+    # ---------- helpers shared with Java & smali paths ----------
+    def _emit_key(issue_type, key_bytes, src_file):
+        L = len(key_bytes or b"")
+        if issue_type == 'Hardcoded AES Key' and L not in (16, 24, 32):
+            return
+        if issue_type == 'Hardcoded DES Key' and L not in (8, 24):
+            return
+        file_name = os.path.basename(src_file)
+        hexval = key_bytes.hex()
         vulnerabilities.append({
             'package_name': package_name,
             'Component': f"{package_name}/{file_name}",
-            'Issue Type': 'Hardcoded AES Key',
-            'Details': f"AES Key: {item['key']}",
+            'Issue Type': issue_type,
+            'Details': f"Hex: {hexval}",
             'ADB Command': 'N/A'
         })
-    for item in found_ivs:
-        file_name = os.path.basename(item['java_file'])
+
+    def _emit_iv(iv_bytes, src_file):
+        if len(iv_bytes or b"") not in (8, 16):
+            return
+        file_name = os.path.basename(src_file)
+        hexval = iv_bytes.hex()
         vulnerabilities.append({
             'package_name': package_name,
             'Component': f"{package_name}/{file_name}",
             'Issue Type': 'Hardcoded IV',
-            'Details': f"IV: {item['iv']}",
-            'ADB Command': 'N/A'
-        })
-    for item in found_des_keys:
-        file_name = os.path.basename(item['java_file'])
-        vulnerabilities.append({
-            'package_name': package_name,
-            'Component': f"{package_name}/{file_name}",
-            'Issue Type': 'Hardcoded DES Key',
-            'Details': f"DES Key: {item['key']}",
+            'Details': f"Hex: {hexval}",
             'ADB Command': 'N/A'
         })
 
+    def _parse_byte_array_literal(body: str):
+        vals = []
+        for token in re.split(r'[,{}\s]+', body or ''):
+            t = token.strip()
+            if not t:
+                continue
+            try:
+                if t.lower().startswith('0x'):
+                    vals.append(int(t, 16) & 0xFF)
+                else:
+                    vals.append(int(t) & 0xFF)
+            except Exception:
+                pass
+        return bytes(vals)
+
+    def _maybe_hex_str_to_bytes(s: str):
+        if s is None:
+            return None
+        st = s.strip()
+        if re.fullmatch(r'[0-9A-Fa-f]+', st) and len(st) % 2 == 0:
+            try:
+                return bytes.fromhex(st)
+            except Exception:
+                return None
+        return None
+
+    def _command_exists(cmd):
+        from shutil import which
+        return which(cmd) is not None
+
+    # ---------- tolerant JADX ----------
+    def _try_jadx(apk_path, out_dir):
+        cand = 'jadx' if _command_exists('jadx') else ('jadx-cli' if _command_exists('jadx-cli') else None)
+        if not cand:
+            return False, "jadx not found"
+        if os.path.exists(out_dir):
+            shutil.rmtree(out_dir, ignore_errors=True)
+        proc = subprocess.run([cand, '-d', out_dir, apk_path, '-q'],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ok = proc.returncode == 0
+        if not ok:
+            any_java = False
+            for root, _, files in os.walk(out_dir):
+                if any(f.endswith('.java') or f.endswith('.kt') for f in files):
+                    any_java = True
+                    break
+            if any_java:
+                return True, f"jadx returned {proc.returncode} but produced sources"
+            return False, proc.stderr.decode(errors='ignore') or f"jadx exit {proc.returncode}"
+        return True, "ok"
+
+    # ---------- apktool / smali ----------
+    def _try_apktool(apk_path, out_dir):
+        if not _command_exists('apktool'):
+            return False, "apktool not found"
+        if os.path.exists(out_dir):
+            shutil.rmtree(out_dir, ignore_errors=True)
+        proc = subprocess.run(['apktool', 'd', '-s', '-o', out_dir, apk_path],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if proc.returncode != 0:
+            return False, proc.stderr.decode(errors='ignore') or f"apktool exit {proc.returncode}"
+        return True, "ok"
+
+    # ---------- Java scan ----------
+    def _scan_java(java_root):
+        var_string_def = re.compile(
+            r'(?:(?:public|private|protected)\s+)?(?:static\s+)?(?:final\s+)?(?:String|char\[\]|java\.lang\.String)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]+)";'
+        )
+        var_bytearr_def = re.compile(
+            r'(?:(?:public|private|protected)\s+)?(?:static\s+)?(?:final\s+)?byte\[\]\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*new\s+byte\[\]\s*\{([^}]+)\};'
+        )
+        sks_call = re.compile(r'new\s+SecretKeySpec\s*\(\s*(.+?)\s*,\s*"([^"]+)"\s*\)', re.DOTALL)
+        iv_call  = re.compile(r'new\s+IvParameterSpec\s*\(\s*(.+?)\s*\)', re.DOTALL)
+
+        lit_getbytes   = re.compile(r'^"([^"]+)"\s*\.\s*getBytes\s*\(')
+        b64_decode     = re.compile(r'Base64\s*\.\s*decode\s*\(\s*"([^"]+)"\s*(?:,\s*Base64\.[A-Z_]+)?\s*\)')
+        new_byte_array = re.compile(r'new\s+byte\[\]\s*\{([^}]+)\}')
+        var_getbytes   = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*getBytes\s*\(')
+        raw_literal    = re.compile(r'^"([^"]+)"\s*$')
+
+        def _resolve_expr_to_bytes(expr: str, variables: dict):
+            e = (expr or '').strip()
+            m = lit_getbytes.search(e)
+            if m:
+                s = m.group(1)
+                h = _maybe_hex_str_to_bytes(s)
+                return h if h is not None else s.encode('utf-8')
+
+            m = b64_decode.search(e)
+            if m:
+                try:
+                    return base64.b64decode(m.group(1))
+                except Exception:
+                    return None
+
+            m = new_byte_array.search(e)
+            if m:
+                return _parse_byte_array_literal(m.group(1))
+
+            m = var_getbytes.search(e)
+            if m:
+                var = m.group(1)
+                sval = variables.get(var)
+                if sval is None:
+                    return None
+                if re.search(r'^\s*(?:-?\d+|0x[0-9A-Fa-f]+)\s*(?:,|$)', sval.strip()):
+                    return _parse_byte_array_literal(sval)
+                h = _maybe_hex_str_to_bytes(sval)
+                return h if h is not None else sval.encode('utf-8')
+
+            m = raw_literal.search(e)
+            if m:
+                s = m.group(1)
+                h = _maybe_hex_str_to_bytes(s)
+                return h if h is not None else s.encode('utf-8')
+
+            m = re.search(r'Base64\s*\.\s*decode\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:,\s*Base64\.[A-Z_]+)?\s*\)', e)
+            if m:
+                var = m.group(1)
+                sval = variables.get(var)
+                if sval:
+                    try:
+                        return base64.b64decode(sval)
+                    except Exception:
+                        return None
+
+            if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', e):
+                sval = variables.get(e)
+                if sval is not None:
+                    if re.search(r'^\s*(?:-?\d+|0x[0-9A-Fa-f]+)\s*(?:,|$)', sval.strip()):
+                        return _parse_byte_array_literal(sval)
+                    h = _maybe_hex_str_to_bytes(sval)
+                    return h if h is not None else sval.encode('utf-8')
+            return None
+
+        for root_dir, _, files in os.walk(java_root):
+            for file in files:
+                if not (file.endswith('.java') or file.endswith('.kt')):
+                    continue
+                java_file = os.path.join(root_dir, file)
+                try:
+                    with open(java_file, 'r', encoding='utf-8', errors='ignore') as f:
+                        code = f.read()
+
+                    variables = {}
+                    for m in var_string_def.finditer(code):
+                        variables[m.group(1)] = m.group(2)
+                    for m in var_bytearr_def.finditer(code):
+                        variables[m.group(1)] = m.group(2)
+
+                    for m in sks_call.finditer(code):
+                        arg_expr = m.group(1)
+                        algo = (m.group(2) or '').upper()
+                        key_bytes = _resolve_expr_to_bytes(arg_expr, variables)
+                        if not key_bytes:
+                            arr = re.search(r'new\s+byte\[\]\s*\{([^}]+)\}', arg_expr)
+                            if arr:
+                                key_bytes = _parse_byte_array_literal(arr.group(1))
+                        if not key_bytes:
+                            continue
+                        if 'AES' in algo:
+                            _emit_key('Hardcoded AES Key', key_bytes, java_file)
+                        elif 'DES' in algo:
+                            _emit_key('Hardcoded DES Key', key_bytes, java_file)
+
+                    for m in iv_call.finditer(code):
+                        arg_expr = m.group(1)
+                        iv_bytes = _resolve_expr_to_bytes(arg_expr, variables)
+                        if not iv_bytes:
+                            arr = re.search(r'new\s+byte\[\]\s*\{([^}]+)\}', arg_expr)
+                            if arr:
+                                iv_bytes = _parse_byte_array_literal(arr.group(1))
+                        if iv_bytes:
+                            _emit_iv(iv_bytes, java_file)
+                except Exception as e:
+                    print(f"{RED}Error reading file {java_file}: {e}{RESET}")
+
+    # ---------- smali scan ----------
+    def _tok(line):
+        return [t.strip() for t in line.strip().strip('{}').split(',') if t.strip()]
+
+    def _parse_array_bytes(lines, start_idx):
+        vals = []
+        i = start_idx
+        while i < len(lines):
+            line = lines[i].strip()
+            if line.startswith('.end array-data'):
+                break
+            for tok in re.split(r'[\s,]+', line):
+                t = tok.strip().rstrip('t')
+                if not t:
+                    continue
+                try:
+                    if t.startswith('0x') or t.startswith('-0x'):
+                        vals.append(int(t, 16) & 0xFF)
+                    else:
+                        vals.append(int(t) & 0xFF)
+                except Exception:
+                    pass
+            i += 1
+        return bytes(vals), i
+
+    def _scan_smali(smali_root):
+        import base64 as _b64
+        for root, _, files in os.walk(smali_root):
+            for fn in files:
+                if not fn.endswith('.smali'):
+                    continue
+                fpath = os.path.join(root, fn)
+                try:
+                    with open(fpath, 'r', encoding='utf-8', errors='ignore') as fh:
+                        lines = fh.readlines()
+                except Exception:
+                    continue
+
+                const_str = {}
+                barray_for_reg = {}
+                array_labels = {}
+                reg_label = {}
+                pending_result = None
+
+                i = 0
+                while i < len(lines):
+                    line = lines[i]
+
+                    if line.lstrip().startswith('.method '):
+                        const_str.clear()
+                        barray_for_reg.clear()
+                        reg_label.clear()
+                        pending_result = None
+
+                    m = re.search(r'\bconst-string\s+([vp][0-9]+),\s*"([^"]+)"', line)
+                    if m:
+                        const_str[m.group(1)] = m.group(2)
+
+                    if 'Landroid/util/Base64;->decode' in line:
+                        regs = re.search(r'\{([^}]*)\}', line)
+                        src_reg = None
+                        if regs:
+                            reglist = _tok(regs.group(1))
+                            if reglist:
+                                src_reg = reglist[0]
+                        pending_result = ('b64', src_reg)
+                    elif 'Ljava/lang/String;->getBytes' in line:
+                        regs = re.search(r'\{([^}]*)\}', line)
+                        src_reg = None
+                        if regs:
+                            reglist = _tok(regs.group(1))
+                            if reglist:
+                                src_reg = reglist[0]
+                        pending_result = ('getbytes', src_reg)
+
+                    m = re.search(r'\bmove-result-object\s+([vp][0-9]+)', line)
+                    if m and pending_result:
+                        kind, sreg = pending_result
+                        dst = m.group(1)
+                        pending_result = None
+                        if sreg and sreg in const_str:
+                            try:
+                                if kind == 'b64':
+                                    barray_for_reg[dst] = _b64.b64decode(const_str[sreg])
+                                else:
+                                    s = const_str[sreg]
+                                    bp = _maybe_hex_str_to_bytes(s)
+                                    barray_for_reg[dst] = bp if bp is not None else s.encode('utf-8')
+                            except Exception:
+                                pass
+
+                    m = re.search(r'\bfill-array-data\s+([vp][0-9]+),\s*(:\w+)', line)
+                    if m:
+                        reg_label[m.group(1)] = m.group(2)
+
+                    if line.lstrip().startswith(':') and '.array-data' in (lines[i+1] if i+1 < len(lines) else ''):
+                        label = line.strip().split()[0]
+                        j = i + 2
+                        data, end_idx = _parse_array_bytes(lines, j)
+                        array_labels[label] = data
+                        for r, lab in list(reg_label.items()):
+                            if lab == label:
+                                barray_for_reg[r] = data
+                        i = end_idx
+
+                    if 'Ljavax/crypto/spec/SecretKeySpec;-><init>(' in line and 'invoke-direct' in line:
+                        regs = re.search(r'\{([^}]*)\}', line)
+                        if regs:
+                            reglist = _tok(regs.group(1))
+                            key_reg = reglist[1] if len(reglist) > 1 else None
+                            algo_reg = reglist[2] if len(reglist) > 2 else None
+                            kb = barray_for_reg.get(key_reg, None)
+                            if kb is None and key_reg in reg_label and reg_label[key_reg] in array_labels:
+                                kb = array_labels.get(reg_label[key_reg])
+                            algo = None
+                            if algo_reg and algo_reg in const_str:
+                                algo = const_str[algo_reg].upper()
+                            if kb:
+                                if (algo and 'AES' in algo) or len(kb) in (16,24,32):
+                                    _emit_key('Hardcoded AES Key', kb, fpath)
+                                elif (algo and 'DES' in algo) or len(kb) in (8,24):
+                                    _emit_key('Hardcoded DES Key', kb, fpath)
+
+                    if 'Ljavax/crypto/spec/IvParameterSpec;-><init>(' in line and 'invoke-direct' in line:
+                        regs = re.search(r'\{([^}]*)\}', line)
+                        if regs:
+                            reglist = _tok(regs.group(1))
+                            iv_reg = reglist[1] if len(reglist) > 1 else None
+                            ivb = barray_for_reg.get(iv_reg, None)
+                            if ivb is None and iv_reg in reg_label and reg_label[iv_reg] in array_labels:
+                                ivb = array_labels.get(reg_label[iv_reg])
+                            if ivb:
+                                _emit_iv(ivb, fpath)
+
+                    i += 1
+
+    # ---------- drive ----------
+    ok, why = _try_jadx(apk_file_abs, base_dir)
+    if ok:
+        _scan_java(base_dir)
+    else:
+        print(f"{YELLOW}Warning: JADX failed for '{apk_file}': {why}{RESET}")
+
+    found_any = any(v.get('Issue Type') in ('Hardcoded AES Key','Hardcoded DES Key','Hardcoded IV') for v in vulnerabilities)
+    if (not ok) or (not found_any):
+        smali_dir = os.path.splitext(apk_file_abs)[0] + "_smali"
+        ok2, why2 = _try_apktool(apk_file_abs, smali_dir)
+        if ok2:
+            _scan_smali(smali_dir)
+        else:
+            print(f"{YELLOW}Warning: apktool fallback failed for '{apk_file}': {why2}{RESET}")
+        try:
+            shutil.rmtree(smali_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    try:
+        shutil.rmtree(base_dir, ignore_errors=True)
+    except Exception:
+        pass
+
     return vulnerabilities
+# ----------------- END AES/IV EXTRACTION -----------------
 
 def analyze_apk_original(args):
     """
@@ -495,12 +777,10 @@ def analyze_apk_original(args):
 
     package_name = get_package_name(root)
 
-   
     dangerous_components = find_dangerous_components(
         manifest_file, target_sdk_version, check_js, check_call
     )
 
-    
     for component_name, comp_data in dangerous_components.items():
         if comp_data['is_call_vulnerable'] and check_call:
             adb_cmd = generate_adb_command(package_name, component_name)
@@ -523,7 +803,6 @@ def analyze_apk_original(args):
             })
 
         if comp_data['is_http_open_vulnerable']:
-           
             if not comp_data['is_js_vulnerable']:
                 cmd_http = (
                     f"adb shell am start "
@@ -544,7 +823,6 @@ def analyze_apk_original(args):
                     'ADB Command': combined_cmd
                 })
             else:
-              
                 cmd_http = (
                     f"adb shell am start "
                     f"-a android.intent.action.VIEW "
@@ -559,13 +837,11 @@ def analyze_apk_original(args):
                     'ADB Command': cmd_http
                 })
 
-   
     apk_name = os.path.basename(apk_file)
     perms_found, new_vulns, normal_protection_permissions = find_permissions(
         manifest_file, apk_name, collect_permission_vulns, package_name
     )
 
-  
     if new_vulns:
         for nv in new_vulns:
             nv['package_name'] = package_name
@@ -574,7 +850,6 @@ def analyze_apk_original(args):
     if perms_found:
         permissions = perms_found
 
-   
     if collect_permission_vulns and normal_protection_permissions:
         comps_req_perms = find_components_requiring_permissions(
             manifest_file, target_sdk_version, normal_protection_permissions, package_name
@@ -591,7 +866,6 @@ def analyze_apk_original(args):
                 'ADB Command': 'N/A'
             })
 
-   
     try:
         subprocess.run(['rm', '-rf', base_dir], check=True)
     except subprocess.CalledProcessError as e:
@@ -630,7 +904,6 @@ def display_vulnerabilities_table(vulnerabilities):
                 for line in adb_command.split("\n"):
                     print(f"   {YELLOW}{line}{RESET}")
             print("-" * 80)
-
 
 def generate_html_report(vulnerabilities, permissions, output_file):
     grouped_by_package = {}
@@ -1111,18 +1384,15 @@ def _scan_apk_for_taptrap_mitigations(apk_path):
     return sigs
 
 def _classify_severity_tuned(is_high_semantic, mitigated):
-    # If code-level mitigations detected, treat as Info.
     if mitigated:
         return "Info"
-    # High only when semantics indicate sensitive actions/inputs
     if is_high_semantic:
         return "High"
-    # Everything else -> Info (to reduce noise)
     return "Info"
 
 def _confidence_score(evidence_count:int, is_high_semantic:bool, mitigated:bool, compose_only:bool=False) -> int:
     if compose_only:
-        base = 35  # conservative for compose-only without semantics
+        base = 35
     else:
         if evidence_count <= 0:
             base = 20
@@ -1154,7 +1424,6 @@ def detect_taptrap_layout_risks_with_context(base_dir, package_name, apk_path):
             v2["Details"] += " Mitigations detected in code; confirm critical views are covered."
         results.append(v2)
 
-    # Compose heuristic: if compose present but no mitigations and no XML controls found, add Info row
     if (sigs.get("compose_ui_present") and sigs.get("compose_sensitive_widgets") and not mitigated and not xml_findings):
         results.append({
             'package_name': package_name,
@@ -1167,6 +1436,7 @@ def detect_taptrap_layout_risks_with_context(base_dir, package_name, apk_path):
         })
     return results
 # --- End TapTrap integration ---
+
 def main():
     global check_aes
     start_time = datetime.now()
@@ -1215,11 +1485,9 @@ def main():
             collect_permission_vulns = True
             check_taptrap = True
         elif option == '-allsafe':
-    
             check_js = True
             check_call = True
             collect_permission_vulns = True
-            check_taptrap = True
             check_taptrap = True
         elif option == '-csv':
             if i + 1 < len(options):
@@ -1229,12 +1497,6 @@ def main():
                 print(f"{RED}Error: '-csv' flag requires an output file name.{RESET}")
                 print_help()
                 sys.exit(1)
-        elif option == '-allsafe':
-    
-            check_js = True
-            check_call = True
-            collect_permission_vulns = True
-            check_taptrap = True
         elif option == '-html':
             if i + 1 < len(options):
                 html_output = options[i + 1]
@@ -1248,10 +1510,8 @@ def main():
             print_help()
             sys.exit(1)
 
-
     if list_permissions_flag:
         collect_permission_vulns = True
-
 
     apk_paths = []
     if os.path.isfile(argument) and argument.endswith('.apk'):
@@ -1284,14 +1544,12 @@ def main():
     all_permissions_dict = {}
     package_names_for_apks = {}
 
-    
     with Pool(pool_size) as pool:
         results_list = list(
             tqdm(pool.imap_unordered(analyze_apk, pool_args),
                  total=len(pool_args),
                  desc="Processing APKs")
         )
-
 
     for result in results_list:
         apk_file, vulnerabilities, perms, package_name = result
@@ -1302,7 +1560,6 @@ def main():
         if package_name:
             package_names_for_apks[apk_file] = package_name
 
-   
     if check_aes:
         print(f"\n{BOLD}Starting AES key extraction...{RESET}\n")
         for apk_file in tqdm(apk_paths, desc="Analyzing for AES keys"):
@@ -1326,7 +1583,6 @@ def main():
     if csv_output:
         print(f"\n{BOLD}Generating CSV report...{RESET}\n")
         generate_csv_report(all_vulnerabilities, all_permissions_dict, csv_output)
-        # Tapjacking-only portfolio CSV
         generate_csv_taptrap_rollup(all_vulnerabilities, csv_output)
 
     if list_permissions_flag:
