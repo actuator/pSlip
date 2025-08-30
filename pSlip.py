@@ -1006,6 +1006,13 @@ tr[id]:target td{background:var(--row-target)!important;box-shadow:inset 0 0 0 1
   .sev-low{background:rgba(16,185,129,.2);color:#bbf7d0}
   .sev-info{background:rgba(59,130,246,.2);color:#bfdbfe}
 }
+
+/* --- overflow safety (2026) --- */
+.container{overflow-x:hidden}
+table{table-layout:fixed;display:block;max-width:100%;overflow-x:auto}
+thead,tbody,tr{width:100%}
+th,td{overflow-wrap:anywhere;word-break:break-word;hyphens:auto}
+.adb-command,.pkg-title,.pkg-sub,a{overflow-wrap:anywhere;word-break:break-word;hyphens:auto}
 </style>
 </head>
 <body>
@@ -1085,7 +1092,7 @@ tr[id]:target td{background:var(--row-target)!important;box-shadow:inset 0 0 0 1
         html_content += """
         <div class='vulnerabilities'>
           <h2>Findings Index</h2>
-          <p>This index lists all findings across categories. Click any item to jump to full details below.</p>
+          <p>This index lists <strong>all</strong> findings across categories. Click any item to jump to full details below.</p>
           <table>
             <tr>
               <th>App (package)</th><th>Issue Type</th><th>Component</th><th>Severity</th><th>Confidence</th>
@@ -1202,6 +1209,7 @@ def _anchorize(s: str) -> str:
 def _taptrap_risk_rollup(vulns):
     """
     Roll up TapTrap findings across an app into:
+      - headline severity (not "Info" if there are findings),
       - numeric score (0-100) balancing peak risk and breadth.
     """
     def _norm(sev):
@@ -1361,7 +1369,7 @@ def _tokenize(s):
     import re as _re
     return set(_re.findall(r"[A-Za-z0-9]+", (s or "").lower()))
 
-
+# Tuned high-risk semantics
 HIGH_RISK_SEMANTIC_TOKENS = {
     "login","auth","verify","pay","checkout","approve","password","otp","pin",
     "confirm","secure","submit","card","transfer","send"
