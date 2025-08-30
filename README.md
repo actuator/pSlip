@@ -7,11 +7,10 @@
 
 <img src="https://github.com/user-attachments/assets/53ff5d6f-c036-4f91-b993-84d0972a04b0" alt="pSlip banner" />
 
->
+
 Whats New?:
-**Tapjacking Detection**
-> **Why Tapjacking in 2025?**
-> Android 15 hardens OS; apps must still block obscured touches. pSlip finds tapjacking-prone controls for security and developers.
+**Tapjacking Detection (BETA)**
+> Android 15 hardens OS; apps must still block obscured touches.
 
 
 # pSlip
@@ -64,11 +63,8 @@ python pSlip.py path/to/apks -allsafe -html report.htm
 ## Tapjacking Signals
 ![pslip](https://github.com/user-attachments/assets/49d028bc-36f1-4947-95cf-efbb4ac4ac96)
 
-
-
-* **High** when UI semantics match:
   `login | auth | verify | pay | checkout | approve | password | otp | pin | confirm | secure | submit | card | transfer | send`
-* **Info** otherwise (defense-in-depth).
+
 ---
 
 ## Output
