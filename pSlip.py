@@ -13,6 +13,21 @@ from datetime import datetime
 import xml.etree.ElementTree as ET
 import platform
 import shutil
+#!/usr/bin/env python3
+import sys
+import subprocess
+import os
+import textwrap
+import re
+import zipfile
+import csv
+import multiprocessing
+from multiprocessing import Pool
+from tqdm import tqdm
+from datetime import datetime
+import xml.etree.ElementTree as ET
+import platform
+import shutil
 
 RESET = "\033[0m"
 YELLOW = "\033[93m"
@@ -30,7 +45,7 @@ BANNER = f"""
 ██║     ███████║███████╗██║██║     
 ╚═╝     ╚══════╝╚═╝╚═╝                                                  
 {RESET}{BOLD}
-Version 1.0.5 | Github.com/Actuator/pSlip
+Version 1.0.6 | Github.com/Actuator/pSlip
 {RESET}
 """
 
@@ -55,6 +70,9 @@ def print_help():
 
 def command_exists(command):
     return shutil.which(command) is not None
+
+ANDROID_NS = 'http://schemas.android.com/apk/res/android'
+
 
 def _has_inline_call_gate(elem):
     perm = (elem.get(f'{{{ANDROID_NS}}}permission') or '').strip()
@@ -103,17 +121,13 @@ def get_package_name(manifest_root):
         return None
 
 def is_exported(component, target_sdk_version):
-    """
-    Checks 'android:exported' status. If not explicitly set and targetSdkVersion < 31,
-    returns True if there's an <intent-filter>.
-    """
+ 
     android_ns = 'http://schemas.android.com/apk/res/android'
     exported = component.get(f'{{{android_ns}}}exported')
     if exported is not None:
         return exported.lower() == 'true'
     else:
-        # For targetSdkVersion <31, exported is implicitly true if there's any intent-filter
-        # For >=31, must be explicitly set; otherwise default is false
+   
         if target_sdk_version is not None and target_sdk_version < 31:
             has_intent_filter = component.find('intent-filter') is not None
             return has_intent_filter
@@ -164,7 +178,7 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
         if application is None:
             return dangerous_components
 
-    
+        # collect export status of target activity 
         real_activities_map = collect_real_activities_export_status(
             application, package_name, target_sdk_version
         )
@@ -177,14 +191,14 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                 if component_name is None:
                     continue
 
-              
+                # both the alias AND its underlying activity must be exported
                 if component_type == 'activity-alias':
                     alias_is_exp = is_exported(component, target_sdk_version)
                     target_name = component.get(f'{{{android_ns}}}targetActivity')
                     if target_name is None:
                         continue
 
-                   
+                    # construct the same format used in real_activities_map
                     fq_target_name = format_component_name(package_name, target_name)
                     underlying_is_exp = real_activities_map.get(fq_target_name, False)
 
@@ -208,25 +222,25 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                     is_js_vulnerable = False
                     is_http_open_vulnerable = False
 
-                    # Check for CALL
+                    # Check for CALL (pSlip hotfix included)
                     if check_call:
                         for action in actions:
                             action_name = action.get(f'{{{android_ns}}}name')
                             if action_name in ('android.intent.action.CALL',
                                                'android.intent.action.CALL_PRIVILEGED'):
-                                # HOTFIX: if the component itself is permission-gated, don't flag it
+                                #if the component itself is permission-gated don't flag it
                                 comp_perm = (component.get(f'{{{android_ns}}}permission') or '').strip()
                                 if comp_perm in (
                                     'android.permission.CALL_PHONE',
                                     'android.permission.CALL_PRIVILEGED',
                                     'android.permission.CALL_EMERGENCY',
                                 ):
-                                    # Properly gated → skip marking as vulnerable
+                                    
                                     continue
                                 is_call_vulnerable = True
                                 break
 
-                    # Check for JavaScript scheme or MIME
+              
                     if check_js:
                         for data_tag in data_elements:
                             scheme = data_tag.get(f'{{{android_ns}}}scheme')
@@ -238,6 +252,7 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                                 is_js_vulnerable = True
                                 break
 
+                   
                     for data_tag in data_elements:
                         scheme = data_tag.get(f'{{{android_ns}}}scheme')
                         host = data_tag.get(f'{{{android_ns}}}host')
@@ -246,7 +261,7 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                                 is_http_open_vulnerable = True
                                 break
 
-                    # if any of the flags are triggered, store the result
+                    # If any of the flags are triggered, store the result
                     if any([is_call_vulnerable, is_js_vulnerable, is_http_open_vulnerable]):
                         formatted_name = format_component_name(package_name, component_name)
                         if formatted_name not in dangerous_components:
@@ -257,7 +272,7 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                                 'is_http_open_vulnerable': False
                             }
 
-                        # keep raw XML for reference
+                        # Keep raw XML for reference
                         intent_filter_str = ET.tostring(intent_filter, encoding='unicode')
                         dangerous_components[formatted_name]['intent_filters'].append(intent_filter_str)
 
@@ -301,7 +316,7 @@ def find_permissions(manifest_file, apk_name, collect_vulnerabilities, package_n
             if name:
                 permissions.append(name)
 
-            # if protectionLevel is normal or not set, add to normal_protection_permissions
+            # if protectionLevel is normal or not set add to normal_protection_permissions
             if protectionLevel is None or protectionLevel == 'normal':
                 normal_protection_permissions.append(name)
 
@@ -362,7 +377,7 @@ def is_valid_apk(apk_file):
         return False
 
 def generate_adb_command(package_name, component_name):
-    """Build an ADB command for CALL-based vulnerabilities."""
+    
     return (
         f"adb shell am start "
         f"-a android.intent.action.CALL "
@@ -371,7 +386,7 @@ def generate_adb_command(package_name, component_name):
     )
 
 def generate_js_adb_command(package_name, component_name):
-    """Build an ADB command for JS-based vulnerabilities."""
+  
     return (
         f"adb shell am start "
         f"-a android.intent.action.VIEW "
@@ -379,14 +394,9 @@ def generate_js_adb_command(package_name, component_name):
         f"-n {package_name}/{component_name.split('/')[-1]}"
     )
 
-# ----------------- FIXED & RESILIENT AES/IV EXTRACTION -----------------
+
 def decompile_and_find_aes_keys(apk_file, package_name):
-    """
-    Resilient AES/IV extraction:
-    - Tolerant to non-zero JADX exit if sources were produced.
-    - Fallback to apktool + smali scanning if Java sources missing or no findings.
-    - Supports keys/IVs via Base64, "str".getBytes(), new byte[]{...}, hex strings, and smali array-data.
-    """
+  
     import base64
 
     vulnerabilities = []
@@ -474,7 +484,7 @@ def decompile_and_find_aes_keys(apk_file, package_name):
             return False, proc.stderr.decode(errors='ignore') or f"jadx exit {proc.returncode}"
         return True, "ok"
 
-    # ---------- apktool / smali ----------
+
     def _try_apktool(apk_path, out_dir):
         if not _command_exists('apktool'):
             return False, "apktool not found"
@@ -486,7 +496,7 @@ def decompile_and_find_aes_keys(apk_file, package_name):
             return False, proc.stderr.decode(errors='ignore') or f"apktool exit {proc.returncode}"
         return True, "ok"
 
-    # ---------- Java scan ----------
+   
     def _scan_java(java_root):
         var_string_def = re.compile(
             r'(?:(?:public|private|protected)\s+)?(?:static\s+)?(?:final\s+)?(?:String|char\[\]|java\.lang\.String)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]+)";'
@@ -762,7 +772,6 @@ def decompile_and_find_aes_keys(apk_file, package_name):
         pass
 
     return vulnerabilities
-# ----------------- END AES/IV EXTRACTION -----------------
 
 def analyze_apk_original(args):
     """
@@ -921,7 +930,6 @@ def display_vulnerabilities_table(vulnerabilities):
                 for line in adb_command.split("\n"):
                     print(f"   {YELLOW}{line}{RESET}")
             print("-" * 80)
-
 def generate_html_report(vulnerabilities, permissions, output_file):
     grouped_by_package = {}
     for v in vulnerabilities:
@@ -931,33 +939,74 @@ def generate_html_report(vulnerabilities, permissions, output_file):
     html_content = """<!DOCTYPE html>
 <html>
 <head>
-    <title>pSlip Vulnerability Report</title>
-    <style>
-        * { margin: 0; padding: 0; }
-        body { background:#fff; font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; color:#1c1e21; margin:20px; }
-        header { background:#4267B2; padding:20px; color:#fff; margin-bottom:20px; }
-        header h1 { margin:0; font-size:28px; }
-        .container { width:90%; margin:0 auto; }
-        .vulnerabilities, .permissions { background:#fff; margin-bottom:40px; padding:15px; border:1px solid #ddd; border-radius:4px; }
-        .vulnerabilities h2, .permissions h2 { color:#4267B2; margin-top:0; }
-        table { width:100%; border-collapse:collapse; margin-bottom:20px; border:1px solid #ddd; }
-        th, td { border:1px solid #ddd; text-align:left; padding:8px; vertical-align:top; }
-        th { background:#f0f2f5; color:#050505; }
-        tr:nth-child(even) { background:#f7f7f7; }
-        tr:nth-child(odd) { background:#ffffff; }
-        .adb-command { white-space: pre-wrap; }
-        .pkg-header{margin:12px 0 8px 0;padding:8px 12px;border-left:4px solid #888;background:#fafafa;border-radius:6px;}
-        .pkg-title{font-size:18px;font-weight:600;}
-        .pkg-sub{font-size:14px;margin-top:4px;color:#333}
-        .sev{padding:2px 6px;border-radius:4px;font-weight:600}
-        .sev-high,.sev-critical{background:#fdecea;color:#b71c1c}
-        .sev-medium{background:#fff4e5;color:#8a4500}
-        .sev-low{background:#e8f5e9;color:#1b5e20}
-        .sev-info{background:#e3f2fd;color:#0d47a1}
-        a { text-decoration: none; color: #1a73e8; }
-        a:hover { text-decoration: underline; }
-        .pkg-sub a { font-weight: 600; }
-    </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>pSlip Vulnerability Report</title>
+<style>
+:root{
+  --bg:#ffffff; --text:#0f172a; --muted:#64748b; --card:#ffffff; --border:#e2e8f0;
+  --primary:#2563eb; --primary-contrast:#ffffff; --radius:12px;
+  --shadow:0 1px 2px rgba(2,8,23,.06),0 8px 24px rgba(2,8,23,.05);
+  --header-h:56px; --row-hover:rgba(2,6,23,.04); --row-target:rgba(37,99,235,.10);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0b1220; --text:#e5e7eb; --muted:#94a3b8; --card:#0e1626; --border:#1f2a44;
+    --primary:#60a5fa; --primary-contrast:#0b1220;
+    --shadow:0 1px 2px rgba(0,0,0,.35),0 8px 24px rgba(0,0,0,.25);
+    --row-hover:rgba(255,255,255,.04); --row-target:rgba(96,165,250,.16);
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;padding:0;color:var(--text);background:
+    radial-gradient(1200px 600px at 20% -10%, rgba(37,99,235,.08), transparent 60%),
+    radial-gradient(900px 500px at 120% 10%, rgba(16,185,129,.06), transparent 60%),
+    var(--bg);
+  font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Helvetica Neue",Arial,"Apple Color Emoji","Segoe UI Emoji";
+  font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;
+}
+header{
+  position:sticky;top:0;z-index:50;height:var(--header-h);display:flex;align-items:center;padding:0 20px;color:#fff;
+  background:linear-gradient(90deg, rgba(3,7,18,.85), rgba(2,6,23,.70)),linear-gradient(90deg,#1f2937,#111827);
+  border-bottom:1px solid rgba(255,255,255,.08);backdrop-filter:saturate(160%) blur(8px);
+}
+header h1{margin:0;font-size:18px;font-weight:700;letter-spacing:.2px}
+.container{width:min(1200px,94vw);margin:20px auto}
+.vulnerabilities,.permissions{
+  background:var(--card);margin:24px 0;padding:18px;border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)
+}
+.vulnerabilities h2,.permissions h2{margin:0 0 12px 0;font-size:18px;letter-spacing:.2px}
+.pkg-header{margin:16px 0 10px 0;padding:12px 14px;border-left:4px solid var(--primary);
+  background:linear-gradient(180deg, rgba(37,99,235,.10), transparent);border-radius:var(--radius)}
+.pkg-title{font-size:18px;font-weight:700}
+.pkg-sub{font-size:13px;color:var(--muted);margin-top:4px}
+.pkg-sub a{font-weight:600;color:var(--primary)}
+a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
+table{
+  width:100%;border-collapse:separate;border-spacing:0;margin-bottom:16px;border:1px solid var(--border);
+  border-radius:var(--radius);overflow:hidden;background:var(--card)
+}
+th,td{ text-align:left;padding:10px 12px;vertical-align:top;border-bottom:1px solid var(--border)}
+th{ background:linear-gradient(180deg, rgba(2,6,23,.04), transparent);font-weight:700;font-size:13px}
+tr:last-child td{border-bottom:0} tr:nth-child(even) td{background:rgba(2,6,23,.02)}
+tr:hover td{background:var(--row-hover);transition:background .15s ease}
+tr[id]:target td{background:var(--row-target)!important;box-shadow:inset 0 0 0 1px var(--primary)}
+.adb-command{white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;font-size:12px}
+/* severity chips */
+.sev{display:inline-block;padding:3px 8px;border-radius:999px;font-weight:700;font-size:12px;letter-spacing:.2px}
+.sev-critical{background:#fee2e2;color:#991b1b}.sev-high{background:#ffe4e6;color:#9f1239}
+.sev-medium{background:#fff7ed;color:#9a3412}.sev-low{background:#ecfdf5;color:#065f46}
+.sev-info{background:#e0f2fe;color:#075985}
+@media (prefers-color-scheme: dark){
+  .sev-critical{background:rgba(239,68,68,.2);color:#fecaca}
+  .sev-high{background:rgba(244,63,94,.2);color:#fecdd3}
+  .sev-medium{background:rgba(251,146,60,.2);color:#fed7aa}
+  .sev-low{background:rgba(16,185,129,.2);color:#bbf7d0}
+  .sev-info{background:rgba(59,130,246,.2);color:#bfdbfe}
+}
+</style>
 </head>
 <body>
     <header><h1>pSlip Vulnerability Report</h1></header>
@@ -967,6 +1016,7 @@ def generate_html_report(vulnerabilities, permissions, output_file):
     html_content += "<p>Generated on: " + _dt.now().strftime('%Y-%m-%d %H:%M:%S') + "</p>"
     html_content += "<div class='vulnerabilities'><h2>Vulnerabilities</h2>"
 
+    # ---------- Tapjacking Risk summary table ----------
     rows = []
     for pkg, vulns in grouped_by_package.items():
         R = _taptrap_risk_rollup(vulns)
@@ -985,7 +1035,7 @@ def generate_html_report(vulnerabilities, permissions, output_file):
       </tr>
     """
     for pkg, head, score, cC, cH, cM, cL, cI, tot in rows:
-        anch = 'pkg-' + ''.join(ch if (ch.isalnum() or ch in '._-') else '-' for ch in pkg)
+        anch = 'pkg-' + _anchorize(pkg)
         html_content += (
             "<tr>"
             f"<td><a href='#{anch}'>{pkg}</a></td><td>{head}</td><td>{score}</td>"
@@ -994,13 +1044,81 @@ def generate_html_report(vulnerabilities, permissions, output_file):
         )
     html_content += "</table><br/>"
 
+    # ---------- General Findings Index ----------
+    index_rows = []  # (pkg, issue_type, component, severity, confidence, anchor)
     if not vulnerabilities:
         html_content += "<p>No vulnerabilities found.</p>"
     else:
+        per_pkg_rows = {}
         for pkg_name, vuln_list in grouped_by_package.items():
-            R = _taptrap_risk_rollup(vuln_list)
+            sorted_list = _sorted_vulns(vuln_list)
+            rows_for_pkg = []
+            anchor_pkg = 'pkg-' + _anchorize(pkg_name)
+            counter = 0
+
+            for v in sorted_list:
+                comp_full  = v.get('Component', 'N/A')
+                issue_type = v.get('Issue Type', 'N/A') or 'N/A'
+                severity   = v.get('Severity', '—')
+                confidence = str(v.get('Confidence', ''))
+                details    = v.get('Details', 'N/A') or 'N/A'
+                adb_cmd    = v.get('ADB Command', 'N/A') or 'N/A'
+                counter += 1
+                row_anchor = f"{anchor_pkg}-v-{counter}"
+                index_rows.append((pkg_name, issue_type, comp_full, severity, confidence, row_anchor))
+                rows_for_pkg.append({
+                    "comp_full": comp_full,
+                    "issue_type": issue_type,
+                    "severity": severity,
+                    "confidence": confidence,
+                    "details": details,
+                    "adb_cmd": adb_cmd,
+                    "row_anchor": row_anchor
+                })
+
+            per_pkg_rows[pkg_name] = {
+                "anchor_pkg": anchor_pkg,
+                "rows": rows_for_pkg,
+                "rollup": _taptrap_risk_rollup(vuln_list)
+            }
+
+        html_content += """
+        <div class='vulnerabilities'>
+          <h2>Findings Index</h2>
+          <p>This index lists all findings across categories. Click any item to jump to full details below.</p>
+          <table>
+            <tr>
+              <th>App (package)</th><th>Issue Type</th><th>Component</th><th>Severity</th><th>Confidence</th>
+            </tr>
+        """
+        if index_rows:
+            index_rows.sort(
+                key=lambda r: (
+                    _severity_rank(r[3]),
+                    -int(float(r[4] or 0)),
+                    r[0].lower(),
+                    r[2].lower()
+                )
+            )
+            for pkg_name, issue_type, comp_full, sev, conf, anchor in index_rows:
+                html_content += (
+                    "<tr>"
+                    f"<td>{pkg_name}</td>"
+                    f"<td>{issue_type}</td>"
+                    f"<td><a href='#{anchor}'>{comp_full}</a></td>"
+                    f"<td>{sev}</td>"
+                    f"<td>{conf}</td>"
+                    "</tr>"
+                )
+        else:
+            html_content += "<tr><td colspan='5'>No findings detected.</td></tr>"
+        html_content += "</table></div>"
+
+        # ---------- Full per-package details ----------
+        for pkg_name, pdata in per_pkg_rows.items():
+            R = pdata["rollup"]
             counts = R["counts"]
-            anchor_id = 'pkg-' + ''.join(ch if (ch.isalnum() or ch in '._-') else '-' for ch in pkg_name)
+            anchor_id = pdata["anchor_pkg"]
             html_content += (
                 f"<div id='{anchor_id}' class='pkg-header'>"
                 f"<div class='pkg-title'>{pkg_name}</div>"
@@ -1012,19 +1130,17 @@ def generate_html_report(vulnerabilities, permissions, output_file):
                 "<table>"
                 "<tr><th>Component</th><th>Issue Type</th><th>Severity</th><th>Confidence</th><th>Details</th></tr>"
             )
-            for v in _sorted_vulns(vuln_list):
-                adb_cmd = v.get('ADB Command', 'N/A') or 'N/A'
+            for row in pdata["rows"]:
                 adb_html = ""
-                if adb_cmd != "N/A":
-                    adb_html = "<br/><strong>ADB Command:</strong><br/><span class='adb-command'>" + adb_cmd.replace("\\n","<br/>") + "</span>"
-                component_full = v.get('Component', 'N/A')
-                issue_type = v.get('Issue Type', 'N/A')
-                severity = v.get('Severity', '—')
-                confidence = str(v.get('Confidence', ''))
-                details = v.get('Details', 'N/A') or 'N/A'
+                if row["adb_cmd"] and row["adb_cmd"] != "N/A":
+                    adb_html = "<br/><strong>ADB Command:</strong><br/><span class='adb-command'>" + row["adb_cmd"].replace("\\n","<br/>") + "</span>"
                 html_content += (
-                    "<tr>"
-                    f"<td>{component_full}</td><td>{issue_type}</td><td>{severity}</td><td>{confidence}</td><td>{details}{adb_html}</td>"
+                    f"<tr id='{row['row_anchor']}'>"
+                    f"<td>{row['comp_full']}</td>"
+                    f"<td>{row['issue_type']}</td>"
+                    f"<td>{row['severity']}</td>"
+                    f"<td>{row['confidence']}</td>"
+                    f"<td>{row['details']}{adb_html}</td>"
                     "</tr>"
                 )
             html_content += "</table>"
@@ -1047,7 +1163,6 @@ def generate_html_report(vulnerabilities, permissions, output_file):
         print(f"{GREEN}HTML report successfully generated at '{output_file}'.{RESET}")
     except Exception as e:
         print(f"{RED}Error: Failed to write HTML report to '{output_file}': {e}{RESET}")
-
 def _severity_rank(sev: str) -> int:
     if not sev:
         return 99
@@ -1078,44 +1193,65 @@ def _is_taptrap_issue(v):
     it = (v.get("Issue Type","") or "").lower()
     return it.startswith("tapjacking risk")
 
+def _anchorize(s: str) -> str:
+    s = ''.join(ch if (ch.isalnum() or ch in '._-') else '-' for ch in (s or ''))
+    while '--' in s:
+        s = s.replace('--', '-')
+    return s.strip('-') or 'item'
+
 def _taptrap_risk_rollup(vulns):
-    tv = [v for v in vulns if _is_taptrap_issue(v)]
-    if not tv:
-        return {"headline":"Info","score":0,"counts":{"Critical":0,"High":0,"Medium":0,"Low":0,"Info":0,"Total":0}}
-    counts = {"Critical":0,"High":0,"Medium":0,"Low":0,"Info":0,"Total":0}
-    def norm(sev):
+    """
+    Roll up TapTrap findings across an app into:
+      - numeric score (0-100) balancing peak risk and breadth.
+    """
+    def _norm(sev):
         s = (sev or "").strip().lower()
         if s == "critical": return "Critical"
         if s == "high": return "High"
         if s == "medium": return "Medium"
         if s == "low": return "Low"
         return "Info"
-    base = 0.0
-    headline = "Info"
-    headline_rank = 99
+
+    def _sev_weight(sev):
+        return {"Critical": 5, "High": 4, "Medium": 3, "Low": 2, "Info": 1}.get(sev, 1)
+
+    tv = [v for v in vulns if _is_taptrap_issue(v)]
+    if not tv:
+        return {"headline": "Info", "score": 0,
+                "counts": {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0, "Total": 0}}
+
+    counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0, "Total": 0}
+    per_sev_conf = {"Critical": [], "High": [], "Medium": [], "Low": [], "Info": []}
+
     for v in tv:
-        sev = norm(v.get("Severity","Info"))
-        counts[sev] += 1
-        counts["Total"] += 1
-        r = _severity_rank(sev)
-        if r < headline_rank:
-            headline_rank = r
-            headline = sev
+        sev = _norm(v.get("Severity", "Info"))
         try:
             conf = float(v.get("Confidence", 0) or 0.0)
         except Exception:
             conf = 0.0
-        w = _severity_weight(sev)
-        s = (w/5.0) * conf
-        if s > base:
-            base = s
-    extra_c = max(0, counts["Critical"] - (1 if headline=="Critical" and base>0 else 0))
-    extra_h = max(0, counts["High"] - (1 if headline=="High" and base>0 else 0))
-    extra_m = max(0, counts["Medium"] - (1 if headline=="Medium" and base>0 else 0))
-    extra_l = counts["Low"]
-    bonus = min(10.0, 3.0*extra_c + 2.0*extra_h + 1.0*extra_m + 0.5*extra_l)
-    score = int(max(0.0, min(100.0, base + bonus)))
+        counts[sev] += 1
+        counts["Total"] += 1
+        per_sev_conf[sev].append(conf)
+
+    present = [s for s in ["Critical", "High", "Medium", "Low"] if counts[s] > 0]
+    headline = present[0] if present else "Info"
+
+    peak = 0.0
+    for sev, confs in per_sev_conf.items():
+        w = _sev_weight(sev) / 5.0
+        if confs:
+            peak = max(peak, w * max(confs))
+
+    bonus = (
+        5.0 * max(0, counts["High"] - 1) +
+        3.0 * counts["Medium"] +
+        1.5 * counts["Low"]
+    )
+    bonus = min(30.0, bonus)
+
+    score = int(max(0.0, min(100.0, peak + bonus)))
     return {"headline": headline, "score": score, "counts": counts}
+
 
 def generate_csv_report(vulnerabilities, permissions, output_file):
     try:
@@ -1225,7 +1361,7 @@ def _tokenize(s):
     import re as _re
     return set(_re.findall(r"[A-Za-z0-9]+", (s or "").lower()))
 
-# Tuned high-risk semantics
+
 HIGH_RISK_SEMANTIC_TOKENS = {
     "login","auth","verify","pay","checkout","approve","password","otp","pin",
     "confirm","secure","submit","card","transfer","send"
@@ -1399,30 +1535,46 @@ def _scan_apk_for_taptrap_mitigations(apk_path):
     ])
     return sigs
 
-def _classify_severity_tuned(is_high_semantic, mitigated):
+def _classify_severity_tuned(is_high_semantic: bool, mitigated: bool, confidence: int) -> str:
+  
     if mitigated:
         return "Info"
-    if is_high_semantic:
-        return "High"
-    return "Info"
 
-def _confidence_score(evidence_count:int, is_high_semantic:bool, mitigated:bool, compose_only:bool=False) -> int:
-    if compose_only:
-        base = 35
+    if is_high_semantic:
+        if confidence >= 75:
+            return "High"
+        if confidence >= 50:
+            return "Medium"
+        if confidence >= 28:
+            return "Low"
+        return "Info"
     else:
-        if evidence_count <= 0:
-            base = 20
-        elif evidence_count == 1:
-            base = 35
-        elif evidence_count == 2:
-            base = 60
-        else:
-            base = 85
+        if confidence >= 80:
+            return "High"
+        if confidence >= 55:
+            return "Medium"
+        if confidence >= 30:
+            return "Low"
+        return "Info"
+
+
+def _confidence_score(evidence_count: int, is_high_semantic: bool, mitigated: bool, compose_only: bool = False) -> int:
+    """
+    Evidence-driven score with caps so a single layout doesn't rocket to 99.
+    """
+    ec = min(int(evidence_count or 0), 3)
+    base = {0: 15, 1: 38, 2: 62, 3: 80}[ec]
+
     if is_high_semantic:
         base += 10
+    if compose_only:
+        base = max(base, 42)
     if mitigated:
         base -= 35
+
     return max(5, min(99, int(base)))
+
+
 
 def detect_taptrap_layout_risks_with_context(base_dir, package_name, apk_path):
     results = []
@@ -1434,8 +1586,10 @@ def detect_taptrap_layout_risks_with_context(base_dir, package_name, apk_path):
         v2 = dict(v)
         is_high = v2.pop('__is_high_semantic', False)
         evidence_count = int(v2.pop('Confidence', 0) or 0)
-        v2["Severity"] = _classify_severity_tuned(is_high, mitigated)
-        v2["Confidence"] = _confidence_score(evidence_count, is_high, mitigated, compose_only=False)
+        conf = _confidence_score(evidence_count, is_high, mitigated, compose_only=False)
+        v2["Confidence"] = conf
+        v2["Severity"] = _classify_severity_tuned(is_high, mitigated, conf)
+
         if mitigated and "Mitigations detected in code" not in v2["Details"]:
             v2["Details"] += " Mitigations detected in code; confirm critical views are covered."
         results.append(v2)
