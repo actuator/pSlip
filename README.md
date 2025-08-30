@@ -31,6 +31,8 @@ This occurs when an application is leveraged into performing actions on behalf o
 *  `-allsafe` mode skips AES for fast, stable sweeps
 
 ---
+<img width="1216" height="545" alt="image" src="https://github.com/user-attachments/assets/5cf5abd9-4e00-481c-93e9-24e3fd001efc" />
+
 
 ## Install
 
@@ -44,7 +46,7 @@ sudo apt install apktool jadx
 
 ## Usage
 
-<img src="https://github.com/user-attachments/assets/1848ca30-e48e-47e5-86be-3e4ff901c03b" />
+
 
 
 ```bash
@@ -61,7 +63,7 @@ python pSlip.py path/to/apks -allsafe -html report.htm
 
 ## Tapjacking Signals
 
-<img width="1216" height="545" alt="image" src="https://github.com/user-attachments/assets/ae41a7b5-93b3-4d8d-ac83-701f877bb3bd" />
+![pslip](https://github.com/user-attachments/assets/74396988-771f-4f8f-8f20-491b0fe12626)
 
 
 * **High** when UI semantics match:
