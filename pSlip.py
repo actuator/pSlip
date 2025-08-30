@@ -30,7 +30,7 @@ BANNER = f"""
 ██║     ███████║███████╗██║██║     
 ╚═╝     ╚══════╝╚═╝╚═╝                                                  
 {RESET}{BOLD}
-Version 1.0.4 | Github.com/Actuator/pSlip
+Version 1.0.5 | Github.com/Actuator/pSlip
 {RESET}
 """
 
@@ -55,6 +55,14 @@ def print_help():
 
 def command_exists(command):
     return shutil.which(command) is not None
+
+def _has_inline_call_gate(elem):
+    perm = (elem.get(f'{{{ANDROID_NS}}}permission') or '').strip()
+    return perm in (
+        'android.permission.CALL_PHONE',
+        'android.permission.CALL_PRIVILEGED',
+        'android.permission.CALL_EMERGENCY',
+    )
 
 def extract_manifest(apk_file, base_dir):
     if os.path.exists(base_dir):
@@ -156,7 +164,7 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
         if application is None:
             return dangerous_components
 
-        # collect export status of  target activity 
+    
         real_activities_map = collect_real_activities_export_status(
             application, package_name, target_sdk_version
         )
@@ -169,14 +177,14 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                 if component_name is None:
                     continue
 
-                # both the alias AND its underlying activity must be exported
+              
                 if component_type == 'activity-alias':
                     alias_is_exp = is_exported(component, target_sdk_version)
                     target_name = component.get(f'{{{android_ns}}}targetActivity')
                     if target_name is None:
                         continue
 
-                    # construct the same format used in real_activities_map
+                   
                     fq_target_name = format_component_name(package_name, target_name)
                     underlying_is_exp = real_activities_map.get(fq_target_name, False)
 
@@ -204,8 +212,17 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                     if check_call:
                         for action in actions:
                             action_name = action.get(f'{{{android_ns}}}name')
-                            if action_name in ['android.intent.action.CALL',
-                                               'android.intent.action.CALL_PRIVILEGED']:
+                            if action_name in ('android.intent.action.CALL',
+                                               'android.intent.action.CALL_PRIVILEGED'):
+                                # HOTFIX: if the component itself is permission-gated, don't flag it
+                                comp_perm = (component.get(f'{{{android_ns}}}permission') or '').strip()
+                                if comp_perm in (
+                                    'android.permission.CALL_PHONE',
+                                    'android.permission.CALL_PRIVILEGED',
+                                    'android.permission.CALL_EMERGENCY',
+                                ):
+                                    # Properly gated → skip marking as vulnerable
+                                    continue
                                 is_call_vulnerable = True
                                 break
 
@@ -221,7 +238,6 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                                 is_js_vulnerable = True
                                 break
 
-                    # Check for "http"/"https" with missing host
                     for data_tag in data_elements:
                         scheme = data_tag.get(f'{{{android_ns}}}scheme')
                         host = data_tag.get(f'{{{android_ns}}}host')
@@ -230,7 +246,7 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                                 is_http_open_vulnerable = True
                                 break
 
-                    # If any of the flags are triggered, store the result
+                    # if any of the flags are triggered, store the result
                     if any([is_call_vulnerable, is_js_vulnerable, is_http_open_vulnerable]):
                         formatted_name = format_component_name(package_name, component_name)
                         if formatted_name not in dangerous_components:
@@ -241,7 +257,7 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                                 'is_http_open_vulnerable': False
                             }
 
-                        # Keep raw XML for reference
+                        # keep raw XML for reference
                         intent_filter_str = ET.tostring(intent_filter, encoding='unicode')
                         dangerous_components[formatted_name]['intent_filters'].append(intent_filter_str)
 
@@ -255,6 +271,7 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
     except Exception as e:
         print(f"{RED}Error: Failed to parse manifest file '{manifest_file}': {e}{RESET}")
     return dangerous_components
+
 
 def find_permissions(manifest_file, apk_name, collect_vulnerabilities, package_name):
     permissions = []
