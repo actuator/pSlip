@@ -62,8 +62,8 @@ python pSlip.py path/to/apks -allsafe -html report.htm
 ---
 
 ## Tapjacking Signals
+![pslip](https://github.com/user-attachments/assets/49d028bc-36f1-4947-95cf-efbb4ac4ac96)
 
-![pslip](https://github.com/user-attachments/assets/74396988-771f-4f8f-8f20-491b0fe12626)
 
 
 * **High** when UI semantics match:
