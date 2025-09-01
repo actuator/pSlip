@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 import sys
+import json
 import subprocess
 import os
 import textwrap
 import re
 import zipfile
-import csv
 import multiprocessing
 from multiprocessing import Pool
 from tqdm import tqdm
@@ -20,7 +20,6 @@ import os
 import textwrap
 import re
 import zipfile
-import csv
 import multiprocessing
 from multiprocessing import Pool
 from tqdm import tqdm
@@ -45,7 +44,7 @@ BANNER = f"""
 ██║     ███████║███████╗██║██║     
 ╚═╝     ╚══════╝╚═╝╚═╝                                                  
 {RESET}{BOLD}
-Version 1.0.6 | Github.com/Actuator/pSlip
+Version 1.0.7 | Github.com/Actuator/pSlip
 {RESET}
 """
 
@@ -62,7 +61,7 @@ def print_help():
         -call             Scan for components with exposed CALL permissions
         -aes              Scan for hardcoded AES/DES keys and IVs
         -taptrap          Scan for tapjacking risk (obscured touch defenses)
-        -csv <file>       Output the vulnerability details to a CSV file
+        -json <file>      Output the vulnerability details to a JSON file
         -all              Scan for all of the vulnerabilities listed above
         -allsafe          Skip AES/DES key detection for faster scans and mitigate decompilation issues
         -html <file>      Output the vulnerability details to an HTML file
@@ -86,12 +85,16 @@ def extract_manifest(apk_file, base_dir):
     if os.path.exists(base_dir):
         try:
             subprocess.run(['rm', '-rf', base_dir], check=True)
+        except Exception:
+            pass
         except subprocess.CalledProcessError as e:
             print(f"{RED}Error: Failed to remove existing directory '{base_dir}': {e}{RESET}")
             return None
     try:
         subprocess.run(['apktool', 'd', '-f', '-o', base_dir, apk_file],
                        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception:
+        pass
     except subprocess.CalledProcessError as e:
         print(f"{RED}Error: Failed to extract APK file '{apk_file}': {e.stderr.decode()}{RESET}")
         return None
@@ -108,6 +111,8 @@ def get_target_sdk_version(manifest_root):
             target_sdk = uses_sdk.get('{http://schemas.android.com/apk/res/android}targetSdkVersion')
             if target_sdk is not None:
                 return int(target_sdk)
+    except Exception:
+        pass
     except Exception as e:
         print(f"{RED}Error: Unable to extract targetSdkVersion: {e}{RESET}")
     return None
@@ -116,6 +121,8 @@ def get_package_name(manifest_root):
     try:
         package_name = manifest_root.attrib.get('package')
         return package_name
+    except Exception:
+        pass
     except Exception as e:
         print(f"{RED}Error: An unexpected error occurred while extracting package name: {e}{RESET}")
         return None
@@ -261,7 +268,7 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                                 is_http_open_vulnerable = True
                                 break
 
-                    # If any of the flags are triggered, store the result
+                    # if any of the flags are triggered-store the result
                     if any([is_call_vulnerable, is_js_vulnerable, is_http_open_vulnerable]):
                         formatted_name = format_component_name(package_name, component_name)
                         if formatted_name not in dangerous_components:
@@ -272,7 +279,7 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                                 'is_http_open_vulnerable': False
                             }
 
-                        # Keep raw XML for reference
+                        # keep raw XML for reference
                         intent_filter_str = ET.tostring(intent_filter, encoding='unicode')
                         dangerous_components[formatted_name]['intent_filters'].append(intent_filter_str)
 
@@ -283,6 +290,8 @@ def find_dangerous_components(manifest_file, target_sdk_version, check_js, check
                         if is_http_open_vulnerable:
                             dangerous_components[formatted_name]['is_http_open_vulnerable'] = True
 
+    except Exception:
+        pass
     except Exception as e:
         print(f"{RED}Error: Failed to parse manifest file '{manifest_file}': {e}{RESET}")
     return dangerous_components
@@ -320,6 +329,8 @@ def find_permissions(manifest_file, apk_name, collect_vulnerabilities, package_n
             if protectionLevel is None or protectionLevel == 'normal':
                 normal_protection_permissions.append(name)
 
+    except Exception:
+        pass
     except Exception as e:
         print(f"{RED}Error: An unexpected error occurred while reading permissions: {e}{RESET}")
         return permissions, [], []
@@ -328,7 +339,7 @@ def find_permissions(manifest_file, apk_name, collect_vulnerabilities, package_n
 
 def find_components_requiring_permissions(manifest_file, target_sdk_version, permissions_list, package_name):
     """
-    Look for exported components that require a permission (with normal or no protection level).
+    look for exported components that require a permission (with normal or no protection level).
     """
     components_requiring_permissions = []
     try:
@@ -357,6 +368,8 @@ def find_components_requiring_permissions(manifest_file, target_sdk_version, per
                         'component_name': formatted_name,
                         'required_permission': permission
                     })
+    except Exception:
+        pass
     except Exception as e:
         print(f"{RED}Error: An unexpected error occurred while finding components requiring permissions: {e}{RESET}")
     return components_requiring_permissions
@@ -369,6 +382,8 @@ def is_valid_apk(apk_file):
                 print(f"{YELLOW}Warning: Corrupted file '{bad_file}' in APK '{apk_file}'. Skipping.{RESET}")
                 return False
             return True
+    except Exception:
+        pass
     except zipfile.BadZipFile:
         print(f"{YELLOW}Warning: '{apk_file}' is not a valid APK file or is corrupted. Skipping.{RESET}")
         return False
@@ -446,6 +461,8 @@ def decompile_and_find_aes_keys(apk_file, package_name):
                     vals.append(int(t) & 0xFF)
             except Exception:
                 pass
+            except Exception:
+                pass
         return bytes(vals)
 
     def _maybe_hex_str_to_bytes(s: str):
@@ -455,6 +472,8 @@ def decompile_and_find_aes_keys(apk_file, package_name):
         if re.fullmatch(r'[0-9A-Fa-f]+', st) and len(st) % 2 == 0:
             try:
                 return bytes.fromhex(st)
+            except Exception:
+                pass
             except Exception:
                 return None
         return None
@@ -526,6 +545,8 @@ def decompile_and_find_aes_keys(apk_file, package_name):
                 try:
                     return base64.b64decode(m.group(1))
                 except Exception:
+                    pass
+                except Exception:
                     return None
 
             m = new_byte_array.search(e)
@@ -556,6 +577,8 @@ def decompile_and_find_aes_keys(apk_file, package_name):
                 if sval:
                     try:
                         return base64.b64decode(sval)
+                    except Exception:
+                        pass
                     except Exception:
                         return None
 
@@ -607,6 +630,8 @@ def decompile_and_find_aes_keys(apk_file, package_name):
                                 iv_bytes = _parse_byte_array_literal(arr.group(1))
                         if iv_bytes:
                             _emit_iv(iv_bytes, java_file)
+                except Exception:
+                    pass
                 except Exception as e:
                     print(f"{RED}Error reading file {java_file}: {e}{RESET}")
 
@@ -632,6 +657,8 @@ def decompile_and_find_aes_keys(apk_file, package_name):
                         vals.append(int(t) & 0xFF)
                 except Exception:
                     pass
+                except Exception:
+                    pass
             i += 1
         return bytes(vals), i
 
@@ -645,6 +672,8 @@ def decompile_and_find_aes_keys(apk_file, package_name):
                 try:
                     with open(fpath, 'r', encoding='utf-8', errors='ignore') as fh:
                         lines = fh.readlines()
+                except Exception:
+                    pass
                 except Exception:
                     continue
 
@@ -698,6 +727,8 @@ def decompile_and_find_aes_keys(apk_file, package_name):
                                     s = const_str[sreg]
                                     bp = _maybe_hex_str_to_bytes(s)
                                     barray_for_reg[dst] = bp if bp is not None else s.encode('utf-8')
+                            except Exception:
+                                pass
                             except Exception:
                                 pass
 
@@ -765,18 +796,25 @@ def decompile_and_find_aes_keys(apk_file, package_name):
             shutil.rmtree(smali_dir, ignore_errors=True)
         except Exception:
             pass
+        except Exception:
+            pass
 
     try:
         shutil.rmtree(base_dir, ignore_errors=True)
     except Exception:
         pass
+    except Exception:
+        pass
 
     return vulnerabilities
 
+
+
+
 def analyze_apk_original(args):
     """
-    Extract, parse, and analyze a single APK for vulnerabilities and permissions.
-    Returns (apk_file, vulnerabilities, permissions, package_name).
+    extract, parse N' analyze a single APK for vulnerabilities and permissions.
+    returns (apk_file, vulnerabilities, permissions, package_name).
     """
     apk_file, list_permissions_flag, check_js, check_call, collect_permission_vulns = args
     vulnerabilities = []
@@ -793,6 +831,8 @@ def analyze_apk_original(args):
     try:
         tree = ET.parse(manifest_file)
         root = tree.getroot()
+    except Exception:
+        pass
     except Exception as e:
         print(f"{RED}Error: Failed to parse manifest file '{manifest_file}': {e}{RESET}")
         return apk_file, vulnerabilities, permissions, None
@@ -894,6 +934,8 @@ def analyze_apk_original(args):
 
     try:
         subprocess.run(['rm', '-rf', base_dir], check=True)
+    except Exception:
+        pass
     except subprocess.CalledProcessError as e:
         print(f"{RED}Warning: Failed to remove directory '{base_dir}': {e}{RESET}")
 
@@ -901,7 +943,7 @@ def analyze_apk_original(args):
 
 def display_vulnerabilities_table(vulnerabilities):
     """
-    Group vulnerabilities by 'package_name' and print them in a neat list.
+    group vulnerabilities by 'package_name' and print them in a neat list.
     """
     if not vulnerabilities:
         print(f"{GREEN}None of the selected vulnerabilities were found.{RESET}")
@@ -1051,7 +1093,7 @@ th,td{overflow-wrap:anywhere;word-break:break-word;hyphens:auto}
         )
     html_content += "</table><br/>"
 
-    # ---------- General Findings Index ----------
+    # ---------- general findings index ----------
     index_rows = []  # (pkg, issue_type, component, severity, confidence, anchor)
     if not vulnerabilities:
         html_content += "<p>No vulnerabilities found.</p>"
@@ -1121,7 +1163,7 @@ th,td{overflow-wrap:anywhere;word-break:break-word;hyphens:auto}
             html_content += "<tr><td colspan='5'>No findings detected.</td></tr>"
         html_content += "</table></div>"
 
-        # ---------- Full per-package details ----------
+        # ---------- per-package details ----------
         for pkg_name, pdata in per_pkg_rows.items():
             R = pdata["rollup"]
             counts = R["counts"]
@@ -1168,6 +1210,8 @@ th,td{overflow-wrap:anywhere;word-break:break-word;hyphens:auto}
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(html_content)
         print(f"{GREEN}HTML report successfully generated at '{output_file}'.{RESET}")
+    except Exception:
+        pass
     except Exception as e:
         print(f"{RED}Error: Failed to write HTML report to '{output_file}': {e}{RESET}")
 def _severity_rank(sev: str) -> int:
@@ -1184,13 +1228,43 @@ def _sorted_vulns(vulns):
         try:
             conf_num = int(conf)
         except Exception:
+            pass
+        except Exception:
             try:
                 conf_num = int(float(conf))
+            except Exception:
+                pass
             except Exception:
                 conf_num = 0
         comp = v.get("Component", "") or ""
         return (_severity_rank(sev), -conf_num, comp.lower())
     return sorted(vulns, key=key)
+
+
+
+def generate_json_report(vulnerabilities, permissions, output_file):
+
+    from datetime import datetime as _dt
+    try:
+        permissions = permissions or {}
+        # sort for determinism
+        vulns_sorted = _sorted_vulns(vulnerabilities or [])
+        report = {
+            "generated_at": _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "summary": {
+                "apps_scanned": len(set(v.get("package_name","") for v in (vulns_sorted or []) if v.get("package_name"))),
+                "findings": len(vulns_sorted or [])
+            },
+            "vulnerabilities": vulns_sorted,
+            "permissions": permissions or {}
+        }
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+        print(f"{GREEN}JSON report written to {output_file}{RESET}")
+    except Exception:
+        pass
+    except Exception as e:
+        print(f"{RED}Error writing JSON: {e}{RESET}")
 
 def _severity_weight(sev: str) -> int:
     s = (str(sev) or "").strip().lower()
@@ -1207,11 +1281,7 @@ def _anchorize(s: str) -> str:
     return s.strip('-') or 'item'
 
 def _taptrap_risk_rollup(vulns):
-    """
-    Roll up TapTrap findings across an app into:
-      - headline severity (not "Info" if there are findings),
-      - numeric score (0-100) balancing peak risk and breadth.
-    """
+
     def _norm(sev):
         s = (sev or "").strip().lower()
         if s == "critical": return "Critical"
@@ -1235,6 +1305,8 @@ def _taptrap_risk_rollup(vulns):
         sev = _norm(v.get("Severity", "Info"))
         try:
             conf = float(v.get("Confidence", 0) or 0.0)
+        except Exception:
+            pass
         except Exception:
             conf = 0.0
         counts[sev] += 1
@@ -1260,47 +1332,6 @@ def _taptrap_risk_rollup(vulns):
     score = int(max(0.0, min(100.0, peak + bonus)))
     return {"headline": headline, "score": score, "counts": counts}
 
-
-def generate_csv_report(vulnerabilities, permissions, output_file):
-    try:
-        with open(output_file, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(["package_name","Component","Issue Type","Severity","Confidence","Details","ADB Command"])
-            for v in _sorted_vulns(vulnerabilities):
-                writer.writerow([
-                    v.get('package_name',''),
-                    v.get('Component',''),
-                    v.get('Issue Type',''),
-                    v.get('Severity',''),
-                    v.get('Confidence',''),
-                    (v.get('Details','') or '').replace('\\n',' '),
-                    (v.get('ADB Command','') or '').replace('\\n','; ')
-                ])
-        print(f"{GREEN}CSV report written to {output_file}{RESET}")
-    except Exception as e:
-        print(f"{RED}Error writing CSV: {e}{RESET}")
-
-def generate_csv_taptrap_rollup(vulnerabilities, output_file):
-    try:
-        grouped_by_package = {}
-        for v in vulnerabilities:
-            grouped_by_package.setdefault(v.get('package_name','unknown'), []).append(v)
-        rows = []
-        for pkg, vulns in grouped_by_package.items():
-            R = _taptrap_risk_rollup(vulns)
-            c = R["counts"]
-            rows.append([pkg, R["headline"], R["score"], c["Critical"], c["High"], c["Medium"], c["Low"], c["Info"], c["Total"]])
-        base, ext = os.path.splitext(output_file)
-        out = base + ".taptrap.apps" + (ext if ext else ".csv")
-        with open(out, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(["package_name","Tapjacking Risk","Tapjacking Score","Critical","High","Medium","Low","Info","Total"])
-            for row in rows:
-                writer.writerow(row)
-        print(f"{GREEN}Tapjacking CSV Risk written to {out}{RESET}")
-    except Exception as e:
-        print(f"{RED}Error writing Tapjacking Risk CSV: {e}{RESET}")
-
 def analyze_apk(args):
     apk_file, list_permissions_flag, check_js, check_call, collect_permission_vulns, check_taptrap = args
     _args_original = (apk_file, list_permissions_flag, check_js, check_call, collect_permission_vulns)
@@ -1311,14 +1342,18 @@ def analyze_apk(args):
             tap_vulns = detect_taptrap_layout_risks_with_context(base_dir, package_name, apk_file)
             if tap_vulns:
                 vulnerabilities.extend(tap_vulns)
+    except Exception:
+        pass
     except Exception as _e:
         try:
             print(f"{YELLOW}Warning: TapTrap scan failed: {_e}{RESET}")
         except Exception:
             pass
+        except Exception:
+            pass
     return apk_file, vulnerabilities, permissions, package_name
 
-# --- TapTrap detection integration (tuned) ---
+# --- TapTrap detection integration (BA...BETA) ---
 def _android_ns():
     return 'http://schemas.android.com/apk/res/android'
 
@@ -1340,6 +1375,8 @@ def _load_strings_map(res_dir):
             try:
                 tree = ET.parse(path)
                 root = tree.getroot()
+            except Exception:
+                pass
             except Exception:
                 continue
             for s in root.findall("string"):
@@ -1365,17 +1402,21 @@ def _resolve_text(attr_val, strings_map):
         return set(framework.get(key, []))
     return {val}
 
+
+
 def _tokenize(s):
     import re as _re
     return set(_re.findall(r"[A-Za-z0-9]+", (s or "").lower()))
 
-# Tuned high-risk semantics
+
 HIGH_RISK_SEMANTIC_TOKENS = {
     "login","auth","verify","pay","checkout","approve","password","otp","pin",
     "confirm","secure","submit","card","transfer","send"
 }
 
 SENSITIVE_INPUT_TYPES = {"textpassword","numberpassword","textvisiblepassword","textwebpassword","phone","number"}
+
+
 
 def _evidence_for_texts(texts, tokens_set):
     hits = []
@@ -1490,9 +1531,13 @@ def detect_taptrap_layout_risks(base_dir, package_name):
                     if high1 or high2:
                         vuln['__is_high_semantic'] = True
                     vulnerabilities.append(vuln)
+    except Exception:
+        pass
     except Exception as e:
         try:
             print(f"{YELLOW}Warning: TapTrap layout scan failed: {e}{RESET}")
+        except Exception:
+            pass
         except Exception:
             pass
     return vulnerabilities
@@ -1530,9 +1575,13 @@ def _scan_apk_for_taptrap_mitigations(apk_path):
                     bfind('PasswordVisualTransformation') or 
                     bfind('OutlinedTextField')):
                     sigs["compose_sensitive_widgets"] = True
+    except Exception:
+        pass
     except Exception as e:
         try:
             print(f"{YELLOW}Warning: dex scan failed: {e}{RESET}")
+        except Exception:
+            pass
         except Exception:
             pass
     sigs["any_mitigation"] = any([
@@ -1567,9 +1616,7 @@ def _classify_severity_tuned(is_high_semantic: bool, mitigated: bool, confidence
 
 
 def _confidence_score(evidence_count: int, is_high_semantic: bool, mitigated: bool, compose_only: bool = False) -> int:
-    """
-    Evidence-driven score with caps so a single layout doesn't rocket to 99.
-    """
+ 
     ec = min(int(evidence_count or 0), 3)
     base = {0: 15, 1: 38, 2: 62, 3: 80}[ec]
 
@@ -1613,7 +1660,70 @@ def detect_taptrap_layout_risks_with_context(base_dir, package_name, apk_path):
             'ADB Command': 'N/A'
         })
     return results
-# --- End TapTrap integration ---
+-
+
+# ---------------- AES scan timeout helpers ----------------
+def _pslip__aes_worker(apk_file, pkg_name, q):
+    """run AES key analysis in an isolated process and return results via queue."""
+    try:
+        res = decompile_and_find_aes_keys(apk_file, pkg_name)
+    except Exception:
+        pass
+    except Exception:
+        res = []
+    try:
+        q.put(res)
+    except Exception:
+        pass
+    except Exception:
+        pass
+
+def run_aes_with_timeout(apk_file, pkg_name, timeout_seconds):
+    """
+    run AES analysis in a separate process with a hard timeout.
+    If it exceeds the timeout, terminate and return [] (assumed failure/skip).
+    If timeout_seconds <= 0, run inline with no timeout.
+    """
+    import multiprocessing
+    if timeout_seconds is None or timeout_seconds <= 0:
+        try:
+            return decompile_and_find_aes_keys(apk_file, pkg_name)
+        except Exception:
+            pass
+        except Exception:
+            return []
+    q = multiprocessing.Queue()
+    p = multiprocessing.Process(target=_pslip__aes_worker, args=(apk_file, pkg_name, q), daemon=True)
+    p.start()
+    p.join(timeout_seconds)
+    if p.is_alive():
+        try:
+            p.terminate()
+        except Exception:
+            pass
+        except Exception:
+            pass
+        try:
+            p.join(5)
+        except Exception:
+            pass
+        except Exception:
+            pass
+        try:
+            print(f"{YELLOW}AES analysis exceeded {timeout_seconds//60} minutes on '{apk_file}'. Skipping and continuing.{RESET}")
+        except Exception:
+            pass
+        except Exception:
+            pass
+        return []
+    try:
+        return q.get_nowait()
+    except Exception:
+        pass
+    except Exception:
+        return []
+
+
 
 def main():
     global check_aes
@@ -1633,7 +1743,9 @@ def main():
     check_aes = False
     check_taptrap = False
     html_output = None
+    aes_timeout_minutes = 5  
     csv_output = None
+    json_output = None
     collect_permission_vulns = False
     html_output = None
 
@@ -1667,20 +1779,48 @@ def main():
             check_call = True
             collect_permission_vulns = True
             check_taptrap = True
-        elif option == '-csv':
+
             if i + 1 < len(options):
-                csv_output = options[i + 1]
+                _csv_file = options[i + 1]
+                # Map to JSON file
+                base, _ext = os.path.splitext(_csv_file)
+                json_output = (base or 'report') + '.json'
+                print(f"{YELLOW}Note: '-csv' is deprecated. Writing JSON to '{json_output}'. Use -json <file> next time.{RESET}")
                 skip_next = True
             else:
-                print(f"{RED}Error: '-csv' flag requires an output file name.{RESET}")
+                print(f"{RED}Error: '-csv' flag requires a value (output file).{RESET}")
                 print_help()
                 sys.exit(1)
+
         elif option == '-html':
             if i + 1 < len(options):
                 html_output = options[i + 1]
                 skip_next = True
             else:
                 print(f"{RED}Error: '-html' flag requires an output file name.{RESET}")
+                print_help()
+                sys.exit(1)
+        elif option == '-json':
+            if i + 1 < len(options):
+                json_output = options[i + 1]
+                skip_next = True
+            else:
+                print(f"{RED}Error: '-json' flag requires a value (output file).{RESET}")
+                print_help()
+                sys.exit(1)
+        elif option == '-aes-timeout':
+            if i + 1 < len(options):
+                try:
+                    aes_timeout_minutes = int(options[i + 1])
+                except Exception:
+                    pass
+                except ValueError:
+                    print(f"{RED}Error: '-aes-timeout' expects an integer number of minutes.{RESET}")
+                    print_help()
+                    sys.exit(1)
+                skip_next = True
+            else:
+                print(f"{RED}Error: '-aes-timeout' flag requires a value (minutes).{RESET}")
                 print_help()
                 sys.exit(1)
         else:
@@ -1738,13 +1878,19 @@ def main():
         if package_name:
             package_names_for_apks[apk_file] = package_name
 
+    ## wired from CLI -> env for AES timeout wrapper
+
+
+
+
     if check_aes:
         print(f"\n{BOLD}Starting AES key extraction...{RESET}\n")
         for apk_file in tqdm(apk_paths, desc="Analyzing for AES keys"):
             if not is_valid_apk(apk_file):
                 continue
             pkg_name = package_names_for_apks.get(apk_file, os.path.basename(apk_file))
-            aes_vulns = decompile_and_find_aes_keys(apk_file, pkg_name)
+            timeout_seconds = max(0, int(aes_timeout_minutes)) * 60
+            aes_vulns = run_aes_with_timeout(apk_file, pkg_name, timeout_seconds)
             if aes_vulns:
                 all_vulnerabilities.extend(aes_vulns)
 
@@ -1772,6 +1918,20 @@ def main():
             print()
 
     print(f"\n{BOLD}Total Execution Time:{RESET} {total_time}")
+
+    if 'json_output' in locals() and json_output:
+        try:
+            generate_json_report(all_vulnerabilities, locals().get("permissions", {}), json_output)
+        except Exception:
+            pass
+        except Exception as _e_json:
+            try:
+                print(f"{RED}Error generating JSON report: {_e_json}{RESET}")
+            except Exception:
+                pass
+            except Exception:
+                pass
+
 
 if __name__ == "__main__":
     main()
