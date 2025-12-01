@@ -44,7 +44,7 @@ BANNER = f"""
 ██║     ███████║███████╗██║██║     
 ╚═╝     ╚══════╝╚═╝╚═╝                                                  
 {RESET}{BOLD}
-Version 1.0.7 | Github.com/Actuator/pSlip
+Version 1.0.8 | Github.com/Actuator/pSlip
 {RESET}
 """
 
@@ -65,6 +65,9 @@ def print_help():
         -all              Scan for all of the vulnerabilities listed above
         -allsafe          Skip AES/DES key detection for faster scans and mitigate decompilation issues
         -html <file>      Output the vulnerability details to an HTML file
+        
+        {BOLD}Note:{RESET} Basic manifest hardening checks (allowBackup, debuggable,
+                     cleartext traffic, exposed providers) are always enabled.
     """))
 
 def command_exists(command):
@@ -80,6 +83,117 @@ def _has_inline_call_gate(elem):
         'android.permission.CALL_PRIVILEGED',
         'android.permission.CALL_EMERGENCY',
     )
+
+def check_manifest_hardening(root, package_name, target_sdk_version):
+    """
+    Perform cheap manifest-level hardening checks.
+
+    This runs by default (no CLI flag) because it is effectively free compared
+    to bytecode/AES scanning and only walks the already-parsed manifest tree.
+    """
+    vulnerabilities = []
+    if root is None or not package_name:
+        return vulnerabilities
+
+    application = root.find('application')
+    if application is None:
+        return vulnerabilities
+
+    # --- android:allowBackup ---
+    allow_backup = application.get(f'{{{ANDROID_NS}}}allowBackup')
+    if allow_backup is None or allow_backup.strip().lower() != 'false':
+        details = (
+            'android:allowBackup is not explicitly set to "false" on the '
+            '<application> tag. This can allow device/ADB backups to include '
+            'app data. For production builds, explicitly set '
+            'android:allowBackup="false" unless backups are strictly '
+            'required and carefully reviewed.'
+        )
+        vulnerabilities.append({
+            'package_name': package_name,
+            'Component': f'{package_name}/Application',
+            'Issue Type': 'Hardening: Insecure Backup (android:allowBackup)',
+            'Details': details,
+            'Severity': 'Medium',
+            'Confidence': 80,
+            'ADB Command': f'adb backup -f {package_name}.ab {package_name}',
+        })
+
+    # --- android:debuggable ---
+    debuggable = application.get(f'{{{ANDROID_NS}}}debuggable')
+    if debuggable is not None and debuggable.strip().lower() == 'true':
+        details = (
+            'android:debuggable="true" is set on the <application> tag. '
+            'Release builds should not be debuggable, as this allows runtime '
+            'inspection and debugging of the app on production devices.'
+        )
+        vulnerabilities.append({
+            'package_name': package_name,
+            'Component': f'{package_name}/Application',
+            'Issue Type': 'Hardening: Debuggable Application',
+            'Details': details,
+            'Severity': 'High',
+            'Confidence': 90,
+            'ADB Command': 'N/A',
+        })
+
+    # --- android:usesCleartextTraffic ---
+    uses_cleartext = application.get(f'{{{ANDROID_NS}}}usesCleartextTraffic')
+    if uses_cleartext is not None and uses_cleartext.strip().lower() == 'true':
+        details = (
+            'android:usesCleartextTraffic="true" allows cleartext (HTTP) '
+            'traffic. Prefer HTTPS for all network calls and consider using '
+            'a Network Security Config to explicitly limit any required '
+            'cleartext endpoints.'
+        )
+        vulnerabilities.append({
+            'package_name': package_name,
+            'Component': f'{package_name}/Application',
+            'Issue Type': 'Hardening: Cleartext Traffic Allowed',
+            'Details': details,
+            'Severity': 'Medium',
+            'Confidence': 80,
+            'ADB Command': 'N/A',
+        })
+
+    # --- Exported ContentProvider without permissions ---
+    providers = application.findall('provider')
+    for provider in providers:
+        name = provider.get(f'{{{ANDROID_NS}}}name') or ''
+        if not name:
+            continue
+        exported = is_exported(provider, target_sdk_version)
+        if not exported:
+            continue
+
+        perm = (provider.get(f'{{{ANDROID_NS}}}permission') or '').strip()
+        read_perm = (provider.get(f'{{{ANDROID_NS}}}readPermission') or '').strip()
+        write_perm = (provider.get(f'{{{ANDROID_NS}}}writePermission') or '').strip()
+
+        if not perm and not read_perm and not write_perm:
+            comp_name = f'{package_name}/{name}'
+            authority = (provider.get('authorities') or '').strip()
+            details = (
+                'Exported ContentProvider without any read/write permission. '
+                'Other applications may be able to query or modify its data.'
+            )
+            if authority:
+                details += f' Authority: "{authority}".'
+            vulnerabilities.append({
+                'package_name': package_name,
+                'Component': comp_name,
+                'Issue Type': 'Hardening: Exposed ContentProvider',
+                'Details': details,
+                'Severity': 'High',
+                'Confidence': 80,
+                'ADB Command': (
+                    f'adb shell content query --uri content://{authority}'
+                    if authority else 'N/A'
+                ),
+            })
+
+    return vulnerabilities
+
 
 def extract_manifest(apk_file, base_dir):
     if os.path.exists(base_dir):
@@ -841,6 +955,15 @@ def analyze_apk_original(args):
         target_sdk_version = 33
 
     package_name = get_package_name(root)
+
+    # Always-on manifest hardening checks (cheap vs. bytecode scanning).
+    try:
+        vulnerabilities.extend(
+            check_manifest_hardening(root, package_name, target_sdk_version)
+        )
+    except Exception:
+        # Hardening checks should never break the overall analysis.
+        pass
 
     dangerous_components = find_dangerous_components(
         manifest_file, target_sdk_version, check_js, check_call
