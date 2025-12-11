@@ -9,49 +9,77 @@
 
 ---
 
-## What’s New (v1.1.2)
+## What’s New (v1.1.3)
 
-**Modernized HTML Report**  
+### **Modernized HTML Report**
 A new flat, responsive layout improves readability, spacing, and dark-mode rendering.  
-The Findings Index now adapts between a desktop table and mobile cards.
+The Findings Index now adapts automatically between a desktop table and mobile card layout.
 
-**Category Summaries Added**  
-The report now includes summaries for:  
-Hardening, Component Exposure, Crypto, JavaScript Injection, URL Redirect, Permissions, and Tapjacking.
+### **Category Summaries**
+Reports now include summaries for:
+**Hardening**, **Component Exposure**, **Crypto**, **JavaScript Injection**,  
+**URL Redirect**, **Permissions**, and **Tapjacking**.
 
-**Updated Severity Model (Android 15)**  
-Severity levels now reflect realistic exploitability under modern Android.  
-Tapjacking is treated as **Informational** unless paired with sensitive actions.
+### **Updated Severity Model (Android 15)**
+Severity weights now reflect realistic exploitability under modern Android.  
+Tapjacking is treated as **Informational** unless paired with sensitive UI actions.
 
-**Cleaner Detail Sections**  
-Improved formatting for ADB commands, severity chips, and long component names.
+### **Cleaner Detail Sections**
+Improved formatting for component names, ADB PoC commands, severity chips,  
+and long package paths.
+
+### **Unified CLI (Simpler Flags!)**
+Scanning behavior has been simplified into two modes:
+
+- `-all` → Full analysis  
+- `-allsafe` → Full analysis without AES/JADX decompilation  
+
+Legacy toggles (`-p`, `-perm`, `-js`, `-call`, `-aes`, `-taptrap`) no longer appear  
+and no longer need to be managed individually.
 
 ---
 
 # pSlip
 
-pSlip identifies Android applications vulnerable to **Permission-Slip / Confused-Deputy** escalation paths by analyzing exported components, intent filters, provider permissions, tapjacking vectors, and cryptographic misuse.
+**pSlip** detects Android applications vulnerable to **Permission-Slip / Confused-Deputy** paths by analyzing:
 
-It is designed for application-security assessments, CI/CD pipelines, and large-scale APK analysis.
+- exported Activities, Services, BroadcastReceivers, Providers  
+- intent filters and unsafe CALL/VIEW handlers  
+- JavaScript-enabled WebViews and URL schemes  
+- manifest hardening controls  
+- unsafe permissions and custom-role exposure  
+- tapjacking/taptrap surface area  
+- cryptographic misuse (AES/IV/key/ECB detection)
+
+pSlip is designed for **application-security testing**, **CI/CD pipelines**, and **bulk APK triage**.
 
 ---
 
 ## Highlights
 
-* Exported component triage  
-  - CALL actions  
-  - VIEW + `javascript:`  
-  - HTTP/HTTPS wildcard filters  
-  - Weak or unsafe custom permissions  
-* Tapjacking/TapTrap detection (XML + Jetpack Compose)  
-* ADB proof-of-concept command generation  
-* HTML and JSON reporting with per-app summaries and detailed findings  
-* Severity and confidence scoring (0–100)  
-* `-allsafe` mode for fast scanning without AES/JADX work
+### Exported Component Triage
+- CALL actions  
+- VIEW + `javascript:` handlers  
+- Wildcard deep links  
+- Weak or normal-protection custom permissions
+
+### Crypto & Code Triage
+- Hardcoded AES/DES/IV patterns  
+- Unsafe mode detection (ECB, static IVs, insecure PRNG)
+
+### UI / Tapjacking Detection
+- Layout XML parsing  
+- Compose tree heuristics  
+- Sensitive-action token scoring
+
+### Reporting
+- HTML and JSON output  
+- ADB PoC generation  
+- Severity + confidence scoring (0–100)
 
 ---
 
-<img src="https://github.com/user-attachments/assets/f85cd23a-e738-4438-a59a-673c349954ae" />
+<img width="892" height="403" alt="image" src="https://github.com/user-attachments/assets/9f68e3a7-8d61-456e-b04f-a7191c065add" />
 
 ---
 
@@ -71,25 +99,28 @@ sudo apt install apktool jadx
 # Directory sweep (full scan)
 python pSlip.py . -all -html demo.html -json demo.json
 
-# Fast sweep (AES disabled)
+# Fast sweep (skip AES/JADX)
 python pSlip.py path/to/apks -allsafe -html report.htm
 ```
 
-**Flags:**
-`-p`, `-perm`, `-js`, `-call`, `-aes`, `-taptrap`,
-`-json <file>`, `-html <file>`,
-`-all`, `-allsafe`,
-`-aes-timeout <minutes>`
+### Supported Flags
+
+```
+-all                   Full analysis (includes AES/JADX)
+-allsafe               Disable AES/JADX for speed/stability
+-html <file>           Write HTML report
+-json <file>           Write JSON report
+-aes-timeout <minutes> Time limit for AES/JADX work (default: 5)
+```
 
 ---
 
 ## Tapjacking Signals
 
-<img src="https://github.com/user-attachments/assets/6ceb3e6c-bf05-457a-aea8-e70ce8eb4ca1" />
+![pSlipVideo2](https://github.com/user-attachments/assets/f6481a73-11f9-4989-b4c0-b0eca4e780f1)
 
 
-
-Token recognition used for semantic scoring:
+Tokens used for semantic scoring:
 
 ```
 login | auth | verify | pay | checkout | approve
@@ -101,16 +132,15 @@ submit | card | transfer | send
 
 ## Output
 
-**HTML Output**
+### **HTML Output**
 
 * Category summaries (Hardening, Exposure, Crypto, JS Injection, URL Redirect, Permissions, Tapjacking)
-* Responsive Findings Index (desktop table + mobile cards)
-* Per-app findings with severity, confidence, and ADB PoC commands
+* Responsive index (table on desktop, cards on mobile)
+* Per-app findings with severity, confidence, and ADB PoC actions
 
-**JSON Output**
+### **JSON Output**
 
-* Structured vulnerability data for ingestion and automation
+* Structured dataset for automation or SIEM ingestion
 
 <img src="https://github.com/user-attachments/assets/036ab34d-4f37-43fa-934b-eb7c528843fd" />
 
----
