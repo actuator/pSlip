@@ -9,27 +9,30 @@
 
 ---
 
-## What’s New (v1.1.1)
+## What’s New (v1.1.2)
 
-**Export Logic Overhaul**  
-Generic exported-component findings now apply only to **Services** and **Broadcast Receivers**.  
-Activities are reported only when they expose actual vulnerabilities (CALL, `javascript:`, HTTP wildcard, tapjacking, AES, etc.).  
-ContentProviders continue to use their dedicated hardening checks.
+**Modernized HTML Report**  
+A new flat, responsive layout improves readability, spacing, and dark-mode rendering.  
+The Findings Index now adapts between a desktop table and mobile cards.
 
-**AES Timeout Control**  
-The new `-aes-timeout` flag (default 5 minutes) prevents stalls during decompilation and key extraction.
+**Category Summaries Added**  
+The report now includes summaries for:  
+Hardening, Component Exposure, Crypto, JavaScript Injection, URL Redirect, Permissions, and Tapjacking.
 
-**JSON Reporting**  
-Use `-json <file>` to generate structured, machine-readable output.  
-Legacy CSV output has been removed.
+**Updated Severity Model (Android 15)**  
+Severity levels now reflect realistic exploitability under modern Android.  
+Tapjacking is treated as **Informational** unless paired with sensitive actions.
+
+**Cleaner Detail Sections**  
+Improved formatting for ADB commands, severity chips, and long component names.
 
 ---
 
 # pSlip
 
-pSlip identifies Android applications vulnerable to **Permission-Slip / Confused Deputy** escalation paths by analyzing exported components, intent filters, provider permissions, tapjacking vectors, and cryptographic misuse.
+pSlip identifies Android applications vulnerable to **Permission-Slip / Confused-Deputy** escalation paths by analyzing exported components, intent filters, provider permissions, tapjacking vectors, and cryptographic misuse.
 
-It is designed for application security assessments, CI/CD triage pipelines, and large-scale APK analysis.
+It is designed for application-security assessments, CI/CD pipelines, and large-scale APK analysis.
 
 ---
 
@@ -42,7 +45,7 @@ It is designed for application security assessments, CI/CD triage pipelines, and
   - Weak or unsafe custom permissions  
 * Tapjacking/TapTrap detection (XML + Jetpack Compose)  
 * ADB proof-of-concept command generation  
-* HTML and JSON reporting with per-app tapjacking portfolio  
+* HTML and JSON reporting with per-app summaries and detailed findings  
 * Severity and confidence scoring (0–100)  
 * `-allsafe` mode for fast scanning without AES/JADX work
 
@@ -82,7 +85,9 @@ python pSlip.py path/to/apks -allsafe -html report.htm
 
 ## Tapjacking Signals
 
-<img src="https://github.com/user-attachments/assets/49d028bc-36f1-4947-95cf-efbb4ac4ac96" />
+<img src="https://github.com/user-attachments/assets/6ceb3e6c-bf05-457a-aea8-e70ce8eb4ca1" />
+
+
 
 Token recognition used for semantic scoring:
 
@@ -98,18 +103,14 @@ submit | card | transfer | send
 
 **HTML Output**
 
-* Tapjacking Portfolio (one-line summary per app)
-* Detailed findings with severity, confidence, and ADB PoC commands
+* Category summaries (Hardening, Exposure, Crypto, JS Injection, URL Redirect, Permissions, Tapjacking)
+* Responsive Findings Index (desktop table + mobile cards)
+* Per-app findings with severity, confidence, and ADB PoC commands
 
 **JSON Output**
 
-* Full structured vulnerability data for automation and ingestion
+* Structured vulnerability data for ingestion and automation
 
 <img src="https://github.com/user-attachments/assets/036ab34d-4f37-43fa-934b-eb7c528843fd" />
 
 ---
-
-## Contribute
-
-Contributions are welcome.
-For significant changes, please open an issue to discuss the proposed approach before submitting a pull request.
