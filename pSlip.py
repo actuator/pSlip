@@ -44,7 +44,7 @@ BANNER = f"""
 ██║     ███████║███████╗██║██║     
 ╚═╝     ╚══════╝╚═╝╚═╝                                                  
 {RESET}{BOLD}
-Version 1.1.1 | Github.com/Actuator/pSlip
+Version 1.1.2 | Github.com/Actuator/pSlip
 {RESET}
 """
 
@@ -1152,7 +1152,140 @@ def display_vulnerabilities_table(vulnerabilities):
                 for line in adb_command.split("\n"):
                     print(f"   {YELLOW}{line}{RESET}")
             print("-" * 80)
+            
+            
+def normalize_all_vulnerability_severities(vulnerabilities):
+    """
+    vulnerabilities have severities consistent with Android 15 rules
+    and user-defined category mappings.
+    """
+
+    for v in vulnerabilities:
+        try:
+            _apply_category_severity(v)
+        except Exception:
+            pass
+            
+def classify_vulnerability_category(v):
+    """
+    Assigns a category to each vulnerability based on its Issue Type.
+    """
+
+    it = (v.get("Issue Type", "") or "").lower()
+
+    # Tapjacking
+    if it.startswith("tapjacking"):
+        return "Tapjacking"
+
+    # Hardening issues
+    if "hardening:" in it:
+        return "Hardening"
+
+    # Component Exposure
+    if it.startswith("exported component"):
+        return "Component Exposure"
+    if it.startswith("exposed call"):
+        return "Component Exposure"
+
+    # JavaScript Injection
+    if "javascript injection" in it:
+        return "JavaScript Injection"
+
+    # URL Redirect
+    if it == "url redirect":
+        return "URL Redirect"
+
+    # Crypto issues
+    if "hardcoded aes key" in it or "hardcoded des key" in it or "hardcoded iv" in it:
+        return "Crypto"
+
+    # Permission Weakness
+    if it == "weak permission":
+        return "Permissions"
+
+    # Fall-back
+    return "Other"
+
+from collections import defaultdict
+
+def rollup_severity_counts(vulns):
+    """
+    Return dict:
+      { "Critical":#, "High":#, "Medium":#, "Low":#, "Info":#, "Total":# }
+    """
+
+    counts = {"Critical":0,"High":0,"Medium":0,"Low":0,"Info":0,"Total":0}
+
+    for v in vulns:
+        sev = (v.get("Severity","Info") or "Info").title()
+        if sev not in counts:
+            sev = "Info"
+        counts[sev] += 1
+        counts["Total"] += 1
+
+    return counts
+
+
+def rollup_by_category(vulnerabilities):
+    """
+    Produces:
+      {
+        "Tapjacking": [v1,v2,...],
+        "Hardening": [...],
+        "Component Exposure": [...],
+        "Crypto": [...],
+        "JavaScript Injection": [...],
+        "URL Redirect": [...],
+        "Permissions": [...],
+        "Other": [...]
+      }
+    """
+
+    cats = defaultdict(list)
+
+    for v in vulnerabilities:
+        cat = classify_vulnerability_category(v)
+        cats[cat].append(v)
+
+    return cats
+
+
+def format_category_summary_table(cat_name, vulns):
+    """
+    Returns HTML summary table for a category.
+  
+    """
+
+    counts = rollup_severity_counts(vulns)
+
+    html = f"""
+    <div class='pkg-header'>
+      <div class='pkg-title'>{cat_name} Summary</div>
+    </div>
+    <table>
+      <tr>
+        <th>Critical</th><th>High</th><th>Medium</th>
+        <th>Low</th><th>Info</th><th>Total</th>
+      </tr>
+      <tr>
+        <td>{counts['Critical']}</td>
+        <td>{counts['High']}</td>
+        <td>{counts['Medium']}</td>
+        <td>{counts['Low']}</td>
+        <td>{counts['Info']}</td>
+        <td>{counts['Total']}</td>
+      </tr>
+    </table>
+    <br/>
+    """
+
+    return html
+
+            
 def generate_html_report(vulnerabilities, permissions, output_file):
+    # Normalize severity across all categories before report generation
+    normalize_all_vulnerability_severities(vulnerabilities)
+
     grouped_by_package = {}
     for v in vulnerabilities:
         pkg = v.get('package_name', 'N/A')
@@ -1164,124 +1297,252 @@ def generate_html_report(vulnerabilities, permissions, output_file):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>pSlip Vulnerability Report</title>
+
 <style>
-:root{
-  --bg:#ffffff; --text:#0f172a; --muted:#64748b; --card:#ffffff; --border:#e2e8f0;
-  --primary:#2563eb; --primary-contrast:#ffffff; --radius:12px;
-  --shadow:0 1px 2px rgba(2,8,23,.06),0 8px 24px rgba(2,8,23,.05);
-  --header-h:56px; --row-hover:rgba(2,6,23,.04); --row-target:rgba(37,99,235,.10);
-}
-@media (prefers-color-scheme: dark){
-  :root{
-    --bg:#0b1220; --text:#e5e7eb; --muted:#94a3b8; --card:#0e1626; --border:#1f2a44;
-    --primary:#60a5fa; --primary-contrast:#0b1220;
-    --shadow:0 1px 2px rgba(0,0,0,.35),0 8px 24px rgba(0,0,0,.25);
-    --row-hover:rgba(255,255,255,.04); --row-target:rgba(96,165,250,.16);
-  }
-}
-*{box-sizing:border-box}
-html{scroll-behavior:smooth}
-body{
-  margin:0;padding:0;color:var(--text);background:
-    radial-gradient(1200px 600px at 20% -10%, rgba(37,99,235,.08), transparent 60%),
-    radial-gradient(900px 500px at 120% 10%, rgba(16,185,129,.06), transparent 60%),
-    var(--bg);
-  font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Helvetica Neue",Arial,"Apple Color Emoji","Segoe UI Emoji";
-  font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;
-}
-header{
-  position:sticky;top:0;z-index:50;height:var(--header-h);display:flex;align-items:center;padding:0 20px;color:#fff;
-  background:linear-gradient(90deg, rgba(3,7,18,.85), rgba(2,6,23,.70)),linear-gradient(90deg,#1f2937,#111827);
-  border-bottom:1px solid rgba(255,255,255,.08);backdrop-filter:saturate(160%) blur(8px);
-}
-header h1{margin:0;font-size:18px;font-weight:700;letter-spacing:.2px}
-.container{width:min(1200px,94vw);margin:20px auto}
-.vulnerabilities,.permissions{
-  background:var(--card);margin:24px 0;padding:18px;border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)
-}
-.vulnerabilities h2,.permissions h2{margin:0 0 12px 0;font-size:18px;letter-spacing:.2px}
-.pkg-header{margin:16px 0 10px 0;padding:12px 14px;border-left:4px solid var(--primary);
-  background:linear-gradient(180deg, rgba(37,99,235,.10), transparent);border-radius:var(--radius)}
-.pkg-title{font-size:18px;font-weight:700}
-.pkg-sub{font-size:13px;color:var(--muted);margin-top:4px}
-.pkg-sub a{font-weight:600;color:var(--primary)}
-a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
-table{
-  width:100%;border-collapse:separate;border-spacing:0;margin-bottom:16px;border:1px solid var(--border);
-  border-radius:var(--radius);overflow:hidden;background:var(--card)
-}
-th,td{ text-align:left;padding:10px 12px;vertical-align:top;border-bottom:1px solid var(--border)}
-th{ background:linear-gradient(180deg, rgba(2,6,23,.04), transparent);font-weight:700;font-size:13px}
-tr:last-child td{border-bottom:0} tr:nth-child(even) td{background:rgba(2,6,23,.02)}
-tr:hover td{background:var(--row-hover);transition:background .15s ease}
-tr[id]:target td{background:var(--row-target)!important;box-shadow:inset 0 0 0 1px var(--primary)}
-.adb-command{white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;font-size:12px}
-/* severity chips */
-.sev{display:inline-block;padding:3px 8px;border-radius:999px;font-weight:700;font-size:12px;letter-spacing:.2px}
-.sev-critical{background:#fee2e2;color:#991b1b}.sev-high{background:#ffe4e6;color:#9f1239}
-.sev-medium{background:#fff7ed;color:#9a3412}.sev-low{background:#ecfdf5;color:#065f46}
-.sev-info{background:#e0f2fe;color:#075985}
-@media (prefers-color-scheme: dark){
-  .sev-critical{background:rgba(239,68,68,.2);color:#fecaca}
-  .sev-high{background:rgba(244,63,94,.2);color:#fecdd3}
-  .sev-medium{background:rgba(251,146,60,.2);color:#fed7aa}
-  .sev-low{background:rgba(16,185,129,.2);color:#bbf7d0}
-  .sev-info{background:rgba(59,130,246,.2);color:#bfdbfe}
+/* ------------------------------------------------------------
+   MODERN THEME 
+------------------------------------------------------------ */
+:root {
+  --bg: #f8fafc;
+  --text: #0f172a;
+  --muted: #64748b;
+  --card: #ffffff;
+  --border: #e2e8f0;
+  --primary: #3b82f6;
+  --primary-hover: #2563eb;
+  --radius: 12px;
 }
 
-/* --- overflow safety (2026) --- */
-.container{overflow-x:hidden}
-table{table-layout:fixed;display:block;max-width:100%;overflow-x:auto}
-thead,tbody,tr{width:100%}
-th,td{overflow-wrap:anywhere;word-break:break-word;hyphens:auto}
-.adb-command,.pkg-title,.pkg-sub,a{overflow-wrap:anywhere;word-break:break-word;hyphens:auto}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b1220;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --card: #111827;
+    --border: #1e293b;
+    --primary: #60a5fa;
+    --primary-hover: #3b82f6;
+  }
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto;
+}
+
+/* ------------------------------------------------------------
+   HEADER
+------------------------------------------------------------ */
+header {
+  background: linear-gradient(90deg, #1e293b, #334155);
+  padding: 14px 20px;
+  color: #fff;
+  font-weight: 700;
+  font-size: 18px;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.container {
+  width: min(1200px, 95vw);
+  margin: 24px auto;
+}
+
+/* ------------------------------------------------------------
+   CARD PANELS
+------------------------------------------------------------ */
+.vulnerabilities, .permissions {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-top: 24px;
+}
+
+/* ------------------------------------------------------------
+   HEADERS
+------------------------------------------------------------ */
+.pkg-header {
+  margin: 18px 0 10px;
+  padding: 14px 14px;
+  background: var(--card);
+  border-left: 4px solid var(--primary);
+  border-radius: var(--radius);
+}
+
+.pkg-title {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.pkg-sub {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+/* ------------------------------------------------------------
+   TABLES 
+------------------------------------------------------------ */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  font-size: 14px;
+}
+
+th {
+  text-align: left;
+  padding: 10px 12px;
+  background: var(--border);
+  font-weight: 600;
+}
+
+td {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+
+tr:hover td {
+  background: rgba(59,130,246,0.08);
+}
+
+/* ------------------------------------------------------------
+   SEVERITY CHIPS
+------------------------------------------------------------ */
+.sev {
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sev-critical { background:#fee2e2; color:#991b1b; }
+.sev-high { background:#ffe4e6; color:#9f1239; }
+.sev-medium { background:#fff7ed; color:#9a3412; }
+.sev-low { background:#ecfdf5; color:#065f46; }
+.sev-info { background:#e0f2fe; color:#075985; }
+
+/* Dark mode tones */
+@media (prefers-color-scheme: dark) {
+  .sev-critical { background: rgba(239,68,68,.2); color:#fecaca; }
+  .sev-high { background: rgba(244,63,94,.2); color:#fecdd3; }
+  .sev-medium { background: rgba(251,146,60,.2); color:#fed7aa; }
+  .sev-low { background: rgba(16,185,129,.2); color:#bbf7d0; }
+  .sev-info { background: rgba(59,130,246,.2); color:#bfdbfe; }
+}
+
+/* ------------------------------------------------------------
+  TABLE → CARD ON MOBILE
+------------------------------------------------------------ */
+.findings-table {
+  width: 100%;
+  display: table;
+}
+
+@media (max-width: 900px) {
+  .findings-table {
+    display: block;
+  }
+  .findings-table thead {
+    display: none;
+  }
+  .findings-table tr {
+    display: grid;
+    grid-template-columns: 1fr;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    margin-bottom: 14px;
+    background: var(--card);
+  }
+  .findings-table td {
+    border: none !important;
+    padding: 6px 0;
+  }
+  .findings-label {
+    font-weight:600;
+    color: var(--muted);
+    display:block;
+    margin-bottom:2px;
+  }
+}
+
 </style>
 </head>
 <body>
-    <header><h1>pSlip Vulnerability Report</h1></header>
-    <div class="container">
+<header>pSlip Vulnerability Report</header>
+<div class="container">
 """
     from datetime import datetime as _dt
-    html_content += "<p>Generated on: " + _dt.now().strftime('%Y-%m-%d %H:%M:%S') + "</p>"
-    html_content += "<div class='vulnerabilities'><h2>Vulnerabilities</h2>"
+    html_content += "<p style='margin-top:10px;'>Generated on: " + _dt.now().strftime('%Y-%m-%d %H:%M:%S') + "</p>"
 
-    # ---------- Tapjacking Risk summary table ----------
-    rows = []
-    for pkg, vulns in grouped_by_package.items():
-        R = _taptrap_risk_rollup(vulns)
-        c = R["counts"]
-        rows.append((pkg, R["headline"], R["score"], c["Critical"], c["High"], c["Medium"], c["Low"], c["Info"], c["Total"]))
-    rows.sort(key=lambda r: (_severity_rank(r[1]), -int(r[2]), r[0]))
+    # ------------------------------------------------------------
+    # SUMMARY SECTION — TAPJACKING + CATEGORY SUMMARIES
+    # ------------------------------------------------------------
+    html_content += "<div class='vulnerabilities'><h2>Summary</h2>"
+
+    # Build categories
+    cats = rollup_by_category(vulnerabilities)
+
+    # ---------------------
+    # TAPJACKING SUMMARY
+    # ---------------------
+    tap_vulns = cats.get("Tapjacking", [])
 
     html_content += """
     <div id='Risk' class='pkg-header'>
-      <div class='pkg-title'>Tapjacking Risk</div>
+      <div class='pkg-title'>Tapjacking Summary</div>
     </div>
-    <table>
-      <tr>
-        <th>App (package)</th><th>Tapjacking Risk</th><th>Score</th>
-        <th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Info</th><th>Total</th>
-      </tr>
+    <p style='max-width:800px'>
+      Tapjacking is deprioritized under modern Android (Android 15+).
+      Unless an app performs financial authorization, password entry, or
+      irreversible actions, tapjacking findings are classified as
+      <strong>Informational</strong> only.
+    </p>
     """
-    for pkg, head, score, cC, cH, cM, cL, cI, tot in rows:
-        anch = 'pkg-' + _anchorize(pkg)
-        html_content += (
-            "<tr>"
-            f"<td><a href='#{anch}'>{pkg}</a></td><td>{head}</td><td>{score}</td>"
-            f"<td>{cC}</td><td>{cH}</td><td>{cM}</td><td>{cL}</td><td>{cI}</td><td>{tot}</td>"
-            "</tr>"
-        )
-    html_content += "</table><br/>"
 
-    # ---------- General Findings Index ----------
+    html_content += format_category_summary_table("Tapjacking", tap_vulns)
+
+    # ---------------------
+    # OTHER SECURITY DOMAINS
+    # ---------------------
+    for cat_name in [
+        "Hardening",
+        "Component Exposure",
+        "Crypto",
+        "JavaScript Injection",
+        "URL Redirect",
+        "Permissions"
+    ]:
+        cat_v = cats.get(cat_name, [])
+        if cat_v:
+            html_content += format_category_summary_table(cat_name, cat_v)
+
+    html_content += "</div>"  # end of Summary card
+    # ------------------------------------------------------------
+    # FINDINGS INDEX — M4-A (Responsive Table → Cards)
+    # ------------------------------------------------------------
+
+    # Build rows
     index_rows = []  # (pkg, issue_type, component, severity, confidence, anchor)
+
     if not vulnerabilities:
         html_content += "<p>No vulnerabilities found.</p>"
     else:
         per_pkg_rows = {}
+
         for pkg_name, vuln_list in grouped_by_package.items():
             sorted_list = _sorted_vulns(vuln_list)
             rows_for_pkg = []
+
             anchor_pkg = 'pkg-' + _anchorize(pkg_name)
             counter = 0
 
@@ -1292,9 +1553,12 @@ th,td{overflow-wrap:anywhere;word-break:break-word;hyphens:auto}
                 confidence = str(v.get('Confidence', ''))
                 details    = v.get('Details', 'N/A') or 'N/A'
                 adb_cmd    = v.get('ADB Command', 'N/A') or 'N/A'
+
                 counter += 1
                 row_anchor = f"{anchor_pkg}-v-{counter}"
+
                 index_rows.append((pkg_name, issue_type, comp_full, severity, confidence, row_anchor))
+
                 rows_for_pkg.append({
                     "comp_full": comp_full,
                     "issue_type": issue_type,
@@ -1311,15 +1575,28 @@ th,td{overflow-wrap:anywhere;word-break:break-word;hyphens:auto}
                 "rollup": _taptrap_risk_rollup(vuln_list)
             }
 
+        # --------------------------------------------------------
+        # Render Findings Index (Table on Desktop, Cards on Mobile)
+        # --------------------------------------------------------
         html_content += """
         <div class='vulnerabilities'>
           <h2>Findings Index</h2>
-          <p>This index lists <strong>all</strong> findings across categories. Click any item to jump to full details below.</p>
-          <table>
-            <tr>
-              <th>App (package)</th><th>Issue Type</th><th>Component</th><th>Severity</th><th>Confidence</th>
-            </tr>
+          <p>This index lists <strong>all findings</strong> across categories. Click any item to jump to full details below.</p>
+
+          <table class='findings-table'>
+            <thead>
+              <tr>
+                <th>App (package)</th>
+                <th>Issue Type</th>
+                <th>Component</th>
+                <th>Severity</th>
+                <th>Conf.</th>
+              </tr>
+            </thead>
+            <tbody>
         """
+
+        # Sort rows safely (severity → confidence → app → component)
         if index_rows:
             index_rows.sort(
                 key=lambda r: (
@@ -1329,52 +1606,125 @@ th,td{overflow-wrap:anywhere;word-break:break-word;hyphens:auto}
                     r[2].lower()
                 )
             )
+
+            # ----------------------------------------------------
+            # DESKTOP MODE (TABLE ROWS)
+            # MOBILE MODE (CARDS) — CSS handles switching
+            # ----------------------------------------------------
             for pkg_name, issue_type, comp_full, sev, conf, anchor in index_rows:
-                html_content += (
-                    "<tr>"
-                    f"<td>{pkg_name}</td>"
-                    f"<td>{issue_type}</td>"
-                    f"<td><a href='#{anchor}'>{comp_full}</a></td>"
-                    f"<td>{sev}</td>"
-                    f"<td>{conf}</td>"
-                    "</tr>"
-                )
+                html_content += f"""
+                <tr onclick="location.hash='#{anchor}'">
+                  <td>
+                    <span class='findings-label'>App</span>
+                    {pkg_name}
+                  </td>
+                  <td>
+                    <span class='findings-label'>Issue</span>
+                    {issue_type}
+                  </td>
+                  <td>
+                    <span class='findings-label'>Component</span>
+                    <a href='#{anchor}'>{comp_full}</a>
+                  </td>
+                  <td>
+                    <span class='findings-label'>Severity</span>
+                    {sev}
+                  </td>
+                  <td>
+                    <span class='findings-label'>Conf.</span>
+                    {conf}
+                  </td>
+                </tr>
+                """
+
         else:
             html_content += "<tr><td colspan='5'>No findings detected.</td></tr>"
-        html_content += "</table></div>"
 
-        # ---------- Full per-package details ----------
+        html_content += """
+            </tbody>
+          </table>
+        </div>
+        """
+
+        # ------------------------------------------------------------
+        # FULL PER-PACKAGE DETAILS (Modernized, zero logic changes)
+        # ------------------------------------------------------------
+
         for pkg_name, pdata in per_pkg_rows.items():
             R = pdata["rollup"]
             counts = R["counts"]
             anchor_id = pdata["anchor_pkg"]
-            html_content += (
-                f"<div id='{anchor_id}' class='pkg-header'>"
-                f"<div class='pkg-title'>{pkg_name}</div>"
-                f"<div class='pkg-sub'>Tapjacking Risk: <span class='sev sev-{R['headline'].lower()}'>{R['headline']}</span> (Score: {R['score']}/100)</div>"
-                f"<div class='pkg-sub'>Counts — Critical: {counts['Critical']}  High: {counts['High']}  Medium: {counts['Medium']}  Low: {counts['Low']}  Info: {counts['Info']}  Total: {counts['Total']}</div>"
-                "</div>"
-            )
-            html_content += (
-                "<table>"
-                "<tr><th>Component</th><th>Issue Type</th><th>Severity</th><th>Confidence</th><th>Details</th></tr>"
-            )
+
+            # Package Header
+            html_content += f"""
+            <div id="{anchor_id}" class="pkg-header">
+              <div class="pkg-title">{pkg_name}</div>
+              <div class="pkg-sub">
+                Tapjacking Risk:
+                <span class='sev sev-{R['headline'].lower()}'>{R['headline']}</span>
+                (Score: {R['score']}/100)
+              </div>
+              <div class="pkg-sub">
+                Counts —
+                Critical: {counts['Critical']}
+                | High: {counts['High']}
+                | Medium: {counts['Medium']}
+                | Low: {counts['Low']}
+                | Info: {counts['Info']}
+                | Total: {counts['Total']}
+              </div>
+            </div>
+            """
+
+            # Findings Table (clean modern table)
+            html_content += """
+            <table class="details-table">
+              <thead>
+                <tr>
+                  <th>Component</th>
+                  <th>Issue Type</th>
+                  <th>Severity</th>
+                  <th>Confidence</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody>
+            """
+
+            # Each finding row
             for row in pdata["rows"]:
                 adb_html = ""
                 if row["adb_cmd"] and row["adb_cmd"] != "N/A":
-                    adb_html = "<br/><strong>ADB Command:</strong><br/><span class='adb-command'>" + row["adb_cmd"].replace("\\n","<br/>") + "</span>"
-                html_content += (
-                    f"<tr id='{row['row_anchor']}'>"
-                    f"<td>{row['comp_full']}</td>"
-                    f"<td>{row['issue_type']}</td>"
-                    f"<td>{row['severity']}</td>"
-                    f"<td>{row['confidence']}</td>"
-                    f"<td>{row['details']}{adb_html}</td>"
-                    "</tr>"
-                )
-            html_content += "</table>"
-            html_content += "<div class='pkg-sub' style='margin:8px 0 24px 0;'><a href='#Risk'>↑ Back to Risk</a></div>"
+                    adb_html = (
+                        "<br/><strong>ADB Command:</strong><br/>"
+                        f"<span class='adb-command'>{row['adb_cmd'].replace('\\n','<br/>')}</span>"
+                    )
 
+                html_content += f"""
+                <tr id="{row['row_anchor']}">
+                  <td>{row['comp_full']}</td>
+                  <td>{row['issue_type']}</td>
+                  <td><span class="sev sev-{row['severity'].lower()}">{row['severity']}</span></td>
+                  <td>{row['confidence']}</td>
+                  <td>{row['details']}{adb_html}</td>
+                </tr>
+                """
+
+            html_content += """
+              </tbody>
+            </table>
+            """
+
+            # Back-link
+            html_content += """
+            <div class='pkg-sub' style='margin:8px 0 24px 0;'>
+              <a href='#Risk'>↑ Back to Summary</a>
+            </div>
+            """
+
+    # ------------------------------------------------------------
+    # PERMISSIONS SUMMARY (unchanged logic, modern visuals)
+    # ------------------------------------------------------------
     if permissions:
         html_content += "<div class='permissions'><h2>Permissions Summary</h2>"
         for apk_file, perms_list in permissions.items():
@@ -1384,8 +1734,14 @@ th,td{overflow-wrap:anywhere;word-break:break-word;hyphens:auto}
                 html_content += f"<li>{perm}</li>"
             html_content += "</ul>"
         html_content += "</div>"
-
+    # ------------------------------------------------------------
+    # CLOSE HTML DOCUMENT
+    # ------------------------------------------------------------
     html_content += "</div></body></html>"
+
+    # ------------------------------------------------------------
+    # WRITE OUTPUT FILE (same behavior as your original)
+    # ------------------------------------------------------------
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(html_content)
@@ -1394,6 +1750,75 @@ th,td{overflow-wrap:anywhere;word-break:break-word;hyphens:auto}
         pass
     except Exception as e:
         print(f"{RED}Error: Failed to write HTML report to '{output_file}': {e}{RESET}")
+
+
+
+        
+def _apply_category_severity(v):
+    """
+    Safely override default severity levels based on category rules.
+    Only applies if the issue type belongs to one of the known pSlip categories.
+    This function NEVER removes or renames fields.
+    """
+
+    it = (v.get("Issue Type", "") or "").lower()
+
+    # ---- Tapjacking (always Info) ----
+    if it.startswith("tapjacking"):
+        v["Severity"] = "Info"
+        return
+
+    # ---- Hardening ----
+    if "hardening:" in it:
+        if "allowbackup" in it:
+            v["Severity"] = "Low"
+        elif "cleartext" in it:
+            v["Severity"] = "Low"
+        elif "debuggable" in it:
+            v["Severity"] = "High"
+        elif "contentprovider" in it:
+            v["Severity"] = "High"
+        return
+
+    # ---- Exported Components ----
+    if it.startswith("exported component"):
+        v["Severity"] = "Medium"
+        return
+
+    # ---- CALL Exposure ----
+    if it.startswith("exposed call"):
+        v["Severity"] = "High"
+        return
+
+    # ---- JavaScript Injection ----
+    if "javascript injection" in it:
+        v["Severity"] = "Medium"
+        return
+
+    # ---- URL Redirect ----
+    if it == "url redirect":
+        v["Severity"] = "Low"
+        return
+
+    # ---- Crypto ----
+    if "hardcoded aes key" in it:
+        v["Severity"] = "High"
+        return
+    if "hardcoded des key" in it:
+        v["Severity"] = "High"
+        return
+    if "hardcoded iv" in it:
+        v["Severity"] = "Medium"
+        return
+
+    # ---- Weak Permission ----
+    if it == "weak permission":
+        v["Severity"] = "Info"
+        return
+
+    # default: leave severity unchanged
+    return
+
 def _severity_rank(sev: str) -> int:
     if not sev:
         return 99
@@ -1423,6 +1848,9 @@ def _sorted_vulns(vulns):
 
 
 def generate_json_report(vulnerabilities, permissions, output_file):
+        # Normalize severity across all categories before JSON output
+    normalize_all_vulnerability_severities(vulnerabilities)
+
     """
     writes a JSON report:
       {
@@ -2117,3 +2545,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
