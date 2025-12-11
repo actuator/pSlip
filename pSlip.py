@@ -44,31 +44,29 @@ BANNER = f"""
 ██║     ███████║███████╗██║██║     
 ╚═╝     ╚══════╝╚═╝╚═╝                                                  
 {RESET}{BOLD}
-Version 1.1.2 | Github.com/Actuator/pSlip
+Version 1.1.3 | Github.com/Actuator/pSlip
 {RESET}
 """
 
 def print_help():
     print(BANNER)
     print(textwrap.dedent(f"""\
-        {BOLD}Usage:{RESET} python pSlip.py <apk_file or directory> [-p] [-js] [-call] [-aes] [-all] [-allsafe] [-html <output_file>]
+        {BOLD}Usage:{RESET} python pSlip.py <apk_file or directory> [-all] [-allsafe] [-html <output_file>] [-json <output_file>]
 
-        {BOLD}Options:{RESET}
-        -h, --help        Show this help message and exit
-        -p                List all permissions requested by the application
-        -perm             Scan for custom permissions that are set to a 'normal' protection level
-        -js               Scan for explicit JavaScript injection vulnerabilities
-        -call             Scan for components with exposed CALL permissions
-        -aes              Scan for hardcoded AES/DES keys and IVs
-        -taptrap          Scan for tapjacking risk (obscured touch defenses)
-        -json <file>      Output the vulnerability details to a JSON file
-        -all              Scan for all of the vulnerabilities listed above
-        -allsafe          Skip AES/DES key detection for faster scans and mitigate decompilation issues
-        -html <file>      Output the vulnerability details to an HTML file
-        
-        {BOLD}Note:{RESET} Basic manifest hardening checks (allowBackup, debuggable,
-                     cleartext traffic, exposed providers) are always enabled.
+        {BOLD}Scan Modes:{RESET}
+        -all              Run full analysis, including AES/DES key scanning
+        -allsafe          Run full analysis but skip AES/DES key scanning (faster & safer)
+
+        {BOLD}Output Options:{RESET}
+        -html <file>      Save the vulnerability report as an HTML file
+        -json <file>      Save the vulnerability report as a JSON file
+
+        {BOLD}Notes:{RESET}
+        • Basic manifest hardening checks (allowBackup, debuggable, cleartextTraffic,
+          exported components, etc.) are always enabled.
+        • Version 1.1.2 uses a unified scanning model for consistent results.
     """))
+
 
 def command_exists(command):
     return shutil.which(command) is not None
@@ -86,7 +84,7 @@ def _has_inline_call_gate(elem):
 
 def check_manifest_hardening(root, package_name, target_sdk_version):
     """
-    Perform cheap manifest-level hardening checks.
+    perform cheap manifest-level hardening checks.
 
     This runs by default (no CLI flag) because it is effectively free compared
     to bytecode/AES scanning and only walks the already-parsed manifest tree.
@@ -1662,9 +1660,9 @@ tr:hover td {
               <div class="pkg-sub">
                 Tapjacking Risk:
                 <span class='sev sev-{R['headline'].lower()}'>{R['headline']}</span>
-                (Score: {R['score']}/100)
+                
               </div>
-              <div class="pkg-sub">
+             <!---- <div class="pkg-sub">
                 Counts —
                 Critical: {counts['Critical']}
                 | High: {counts['High']}
@@ -1672,7 +1670,7 @@ tr:hover td {
                 | Low: {counts['Low']}
                 | Info: {counts['Info']}
                 | Total: {counts['Total']}
-              </div>
+              </div> <-------!>
             </div>
             """
 
@@ -2341,10 +2339,26 @@ def run_aes_with_timeout(apk_file, pkg_name, timeout_seconds):
         return []
 
 
-
 def main():
     global check_aes
     start_time = datetime.now()
+
+    # ------------------------------------------------------------------
+    # Ensure ALL expected flag variables ALWAYS exist (prevents NameError)
+    # ------------------------------------------------------------------
+    list_permissions_flag = False
+    check_js = False
+    check_call = False
+    check_taptrap = False
+    collect_permission_vulns = False
+    check_aes = False
+    html_output = None
+    json_output = None
+    csv_output = None
+    aes_timeout_minutes = 5
+    # ------------------------------------------------------------------
+
+    # Must have at least APK argument
     if len(sys.argv) < 2:
         print_help()
         sys.exit(1)
@@ -2354,114 +2368,107 @@ def main():
         print_help()
         sys.exit(0)
 
-    list_permissions_flag = False
-    check_js = False
-    check_call = False
-    check_aes = False
-    check_taptrap = False
-    html_output = None
-    aes_timeout_minutes = 5  
-    csv_output = None
-    json_output = None
-    collect_permission_vulns = False
-    html_output = None
+    # ------------------------------------------------------------------
+    # Unified scanning model: only -all and -allsafe matter
+    # ------------------------------------------------------------------
 
+    # Default mode → full scan
+    effective_mode = "all"
+
+    if "-allsafe" in sys.argv:
+        effective_mode = "allsafe"
+    elif "-all" in sys.argv:
+        effective_mode = "all"
+
+    # Apply unified mode
+    if effective_mode == "all":
+        check_js = True
+        check_call = True
+        check_taptrap = True
+        collect_permission_vulns = True
+        list_permissions_flag = True
+        check_aes = True
+
+    elif effective_mode == "allsafe":
+        check_js = True
+        check_call = True
+        check_taptrap = True
+        collect_permission_vulns = True
+        list_permissions_flag = True
+        check_aes = False
+
+    # ------------------------------------------------------------------
+    # Output flags (-html, -json, -aes-timeout)
+    # ------------------------------------------------------------------
     options = sys.argv[2:]
     skip_next = False
+
     for i, option in enumerate(options):
+
         if skip_next:
             skip_next = False
             continue
 
-        if option == '-p':
-            list_permissions_flag = True
-        elif option == '-js':
-            check_js = True
-        elif option == '-call':
-            check_call = True
-        elif option == '-aes':
-            check_aes = True
-        elif option == '-taptrap':
-            check_taptrap = True
-        elif option == '-perm':
-            collect_permission_vulns = True
-        elif option == '-all':
-            check_js = True
-            check_call = True
-            check_aes = True
-            collect_permission_vulns = True
-            check_taptrap = True
-        elif option == '-allsafe':
-            check_js = True
-            check_call = True
-            collect_permission_vulns = True
-            check_taptrap = True
-           #Disable AES scan for speed and safety
-            check_aes = False
-            continue
-
-
-
-        elif option == '-html':
+        if option == "-html":
             if i + 1 < len(options):
                 html_output = options[i + 1]
                 skip_next = True
+                continue
             else:
-                print(f"{RED}Error: '-html' flag requires an output file name.{RESET}")
-                print_help()
+                print(f"{RED}Error: -html requires a filename.{RESET}")
                 sys.exit(1)
-        elif option == '-json':
+
+        elif option == "-json":
             if i + 1 < len(options):
                 json_output = options[i + 1]
                 skip_next = True
+                continue
             else:
-                print(f"{RED}Error: '-json' flag requires a value (output file).{RESET}")
-                print_help()
+                print(f"{RED}Error: -json requires a filename.{RESET}")
                 sys.exit(1)
-        elif option == '-aes-timeout':
+
+        elif option == "-aes-timeout":
             if i + 1 < len(options):
                 try:
                     aes_timeout_minutes = int(options[i + 1])
-                except Exception:
-                    pass
                 except ValueError:
-                    print(f"{RED}Error: '-aes-timeout' expects an integer number of minutes.{RESET}")
-                    print_help()
+                    print(f"{RED}Error: -aes-timeout requires minutes as an integer.{RESET}")
                     sys.exit(1)
                 skip_next = True
+                continue
             else:
-                print(f"{RED}Error: '-aes-timeout' flag requires a value (minutes).{RESET}")
-                print_help()
+                print(f"{RED}Error: -aes-timeout requires a value.{RESET}")
                 sys.exit(1)
-        else:
-            print(f"{RED}Unknown option: {option}{RESET}")
-            print_help()
-            sys.exit(1)
 
-    if list_permissions_flag:
-        collect_permission_vulns = True
+        # ALL other flags are ignored silently now (legacy behavior removed)
 
+    # ------------------------------------------------------------------
+    # Locate APKs
+    # ------------------------------------------------------------------
     apk_paths = []
-    if os.path.isfile(argument) and argument.endswith('.apk'):
+    if os.path.isfile(argument) and argument.endswith(".apk"):
         apk_paths.append(argument)
     elif os.path.isdir(argument):
         for root, dirs, files in os.walk(argument):
             for file in files:
-                if file.endswith('.apk'):
-                    apk_file = os.path.join(root, file)
-                    apk_paths.append(apk_file)
+                if file.endswith(".apk"):
+                    apk_paths.append(os.path.join(root, file))
     else:
-        print(f"{RED}Error: Please provide a valid APK file or directory.{RESET}")
+        print(f"{RED}Error: Invalid APK or directory.{RESET}")
         print_help()
         sys.exit(1)
 
     if not apk_paths:
-        print(f"{RED}No APK files found to analyze.{RESET}")
+        print(f"{RED}No APK files found.{RESET}")
         sys.exit(1)
 
+    # ------------------------------------------------------------------
+    # MANIFEST SCANNING
+    # ------------------------------------------------------------------
     print(BANNER)
     pool_args = [
-        (apk_file, list_permissions_flag, check_js, check_call, collect_permission_vulns, check_taptrap)
+        (apk_file, list_permissions_flag, check_js, check_call,
+         collect_permission_vulns, check_taptrap)
         for apk_file in apk_paths
     ]
 
@@ -2480,30 +2487,41 @@ def main():
         )
 
     for result in results_list:
-        apk_file, vulnerabilities, perms, package_name = result
-        if vulnerabilities:
-            all_vulnerabilities.extend(vulnerabilities)
+        apk_file, vulns, perms, pkg_name = result
+        if vulns:
+            all_vulnerabilities.extend(vulns)
         if perms and list_permissions_flag:
             all_permissions_dict[apk_file] = perms
-        if package_name:
-            package_names_for_apks[apk_file] = package_name
+        if pkg_name:
+            package_names_for_apks[apk_file] = pkg_name
 
-    ## wired from CLI -> env for AES timeout wrapper
-
-
-
-
+    # ------------------------------------------------------------------
+    # AES SCANNING (with duplicate suppression)
+    # ------------------------------------------------------------------
     if check_aes:
         print(f"\n{BOLD}Starting AES key extraction...{RESET}\n")
+
+        seen_aes = set()
+
         for apk_file in tqdm(apk_paths, desc="Analyzing for AES keys"):
             if not is_valid_apk(apk_file):
                 continue
-            pkg_name = package_names_for_apks.get(apk_file, os.path.basename(apk_file))
-            timeout_seconds = max(0, int(aes_timeout_minutes)) * 60
-            aes_vulns = run_aes_with_timeout(apk_file, pkg_name, timeout_seconds)
-            if aes_vulns:
-                all_vulnerabilities.extend(aes_vulns)
 
+            pkg = package_names_for_apks.get(apk_file, os.path.basename(apk_file))
+            timeout_seconds = max(0, aes_timeout_minutes) * 60
+
+            aes_vulns = run_aes_with_timeout(apk_file, pkg, timeout_seconds)
+
+            if aes_vulns:
+                for v in aes_vulns:
+                    sig = (v.get("component"), v.get("issue_type"))
+                    if sig not in seen_aes:
+                        seen_aes.add(sig)
+                        all_vulnerabilities.append(v)
+
+    # ------------------------------------------------------------------
+    # OUTPUT REPORTS
+    # ------------------------------------------------------------------
     end_time = datetime.now()
     total_time = end_time - start_time
 
@@ -2511,11 +2529,11 @@ def main():
     display_vulnerabilities_table(all_vulnerabilities)
 
     if html_output:
-        print(f"\n{BOLD}Generating HTML report...{RESET}\n")
+        print(f"\n{BOLD}Generating HTML report...{RESET}")
         generate_html_report(all_vulnerabilities, all_permissions_dict, html_output)
 
     if csv_output:
-        print(f"\n{BOLD}Generating CSV report...{RESET}\n")
+        print(f"\n{BOLD}Generating CSV report...{RESET}")
         generate_csv_report(all_vulnerabilities, all_permissions_dict, csv_output)
         generate_csv_taptrap_rollup(all_vulnerabilities, csv_output)
 
@@ -2525,24 +2543,18 @@ def main():
             print(f"{CYAN}{os.path.basename(apk_file)}:{RESET}")
             for perm in perms:
                 print(f"  {perm}")
-            print()
 
     print(f"\n{BOLD}Total Execution Time:{RESET} {total_time}")
 
-    if 'json_output' in locals() and json_output:
+    if json_output:
         try:
-            generate_json_report(all_vulnerabilities, locals().get("permissions", {}), json_output)
+            generate_json_report(all_vulnerabilities,
+                                 locals().get("permissions", {}),
+                                 json_output)
         except Exception:
             pass
-        except Exception as _e_json:
-            try:
-                print(f"{RED}Error generating JSON report: {_e_json}{RESET}")
-            except Exception:
-                pass
-            except Exception:
-                pass
 
 
+# ENTRY POINT
 if __name__ == "__main__":
     main()
-
