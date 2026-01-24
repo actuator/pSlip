@@ -44,7 +44,7 @@ BANNER = f"""
 ██║     ███████║███████╗██║██║     
 ╚═╝     ╚══════╝╚═╝╚═╝                                                  
 {RESET}{BOLD}
-Version 1.1.3 | Github.com/Actuator/pSlip
+Version 1.1.4 | https:actuator.sh
 {RESET}
 """
 
@@ -64,7 +64,7 @@ def print_help():
         {BOLD}Notes:{RESET}
         • Basic manifest hardening checks (allowBackup, debuggable, cleartextTraffic,
           exported components, etc.) are always enabled.
-        • Version 1.1.2 uses a unified scanning model for consistent results.
+        • Version 1.1.4 uses a unified scanning model for consistent results.
     """))
 
 
@@ -1526,7 +1526,7 @@ tr:hover td {
 
     html_content += "</div>"  # end of Summary card
     # ------------------------------------------------------------
-    # FINDINGS INDEX — M4-A (Responsive Table → Cards)
+    # FINDINGS INDEX 
     # ------------------------------------------------------------
 
     # Build rows
@@ -2343,9 +2343,6 @@ def main():
     global check_aes
     start_time = datetime.now()
 
-    # ------------------------------------------------------------------
-    # Ensure ALL expected flag variables ALWAYS exist (prevents NameError)
-    # ------------------------------------------------------------------
     list_permissions_flag = False
     check_js = False
     check_call = False
@@ -2440,7 +2437,7 @@ def main():
                 print(f"{RED}Error: -aes-timeout requires a value.{RESET}")
                 sys.exit(1)
 
-        # ALL other flags are ignored silently now (legacy behavior removed)
+        
 
     # ------------------------------------------------------------------
     # Locate APKs
@@ -2496,7 +2493,7 @@ def main():
             package_names_for_apks[apk_file] = pkg_name
 
     # ------------------------------------------------------------------
-    # AES SCANNING (with duplicate suppression)
+    # AES SCANNING 
     # ------------------------------------------------------------------
     if check_aes:
         print(f"\n{BOLD}Starting AES key extraction...{RESET}\n")
