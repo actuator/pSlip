@@ -44,7 +44,7 @@ BANNER = f"""
 ██║     ███████║███████╗██║██║     
 ╚═╝     ╚══════╝╚═╝╚═╝                                                  
 {RESET}{BOLD}
-Version 1.1.4 | https:actuator.sh
+Version 1.1.4 | https://actuator.sh/
 {RESET}
 """
 
