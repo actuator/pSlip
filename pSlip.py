@@ -44,7 +44,7 @@ BANNER = f"""
 ██║     ███████║███████╗██║██║     
 ╚═╝     ╚══════╝╚═╝╚═╝                                                  
 {RESET}{BOLD}
-Version 1.1.4 | https://actuator.sh/
+Version 1.1.5 | https://actuator.sh/
 {RESET}
 """
 
@@ -61,10 +61,7 @@ def print_help():
         -html <file>      Save the vulnerability report as an HTML file
         -json <file>      Save the vulnerability report as a JSON file
 
-        {BOLD}Notes:{RESET}
-        • Basic manifest hardening checks (allowBackup, debuggable, cleartextTraffic,
-          exported components, etc.) are always enabled.
-        • Version 1.1.4 uses a unified scanning model for consistent results.
+      
     """))
 
 
@@ -548,6 +545,57 @@ def build_exported_component_adb(package_name, component_name, component_type):
 
 
 
+
+def detect_segment_write_keys(scan_root, package_name):
+    """
+    Case-insensitive detector for Segment write keys.
+
+    Matches examples like:
+      SEGMENT_WRITE_KEY = "..."
+      "segmentWriteKey":"..."
+    """
+    vulnerabilities = []
+
+    key_pattern = re.compile(
+        r"""(?ix)
+        (?:
+            ["']?segment[_-]?write[_-]?key["']?
+            \s*[:=]\s*
+            ["']([A-Za-z0-9]{10,})["']
+        )
+        """
+    )
+
+    for root, _, files in os.walk(scan_root):
+        for file in files:
+            if not file.endswith((
+                ".java", ".kt", ".json", ".xml", ".txt",
+                ".js", ".ts", ".properties", ".smali"
+            )):
+                continue
+
+            file_path = os.path.join(root, file)
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+
+                for match in key_pattern.finditer(content):
+                    key_value = match.group(1)
+                    vulnerabilities.append({
+                        "package_name": package_name,
+                        "Component": f"{package_name}/{file}",
+                        "Issue Type": "Hardcoded Segment Write Key",
+                        "Details": f"Segment write key detected: {key_value}",
+                        "Severity": "High",
+                        "Confidence": 95,
+                        "ADB Command": "N/A"
+                    })
+            except Exception:
+                pass
+
+    return vulnerabilities
+
+
 def decompile_and_find_aes_keys(apk_file, package_name):
   
     import base64
@@ -919,6 +967,10 @@ def decompile_and_find_aes_keys(apk_file, package_name):
     ok, why = _try_jadx(apk_file_abs, base_dir)
     if ok:
         _scan_java(base_dir)
+    try:
+        vulnerabilities.extend(detect_segment_write_keys(base_dir, package_name))
+    except Exception:
+        pass
     else:
         print(f"{YELLOW}Warning: JADX failed for '{apk_file}': {why}{RESET}")
 
@@ -1192,6 +1244,10 @@ def classify_vulnerability_category(v):
     # URL Redirect
     if it == "url redirect":
         return "URL Redirect"
+
+    # Secrets
+    if "hardcoded segment write key" in it:
+        return "Secrets"
 
     # Crypto issues
     if "hardcoded aes key" in it or "hardcoded des key" in it or "hardcoded iv" in it:
@@ -1796,6 +1852,11 @@ def _apply_category_severity(v):
     # ---- URL Redirect ----
     if it == "url redirect":
         v["Severity"] = "Low"
+        return
+
+    # ---- Segment ----
+    if "hardcoded segment write key" in it:
+        v["Severity"] = "High"
         return
 
     # ---- Crypto ----
