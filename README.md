@@ -1,4 +1,3 @@
-
 [![License](http://img.shields.io/:license-apache-blue.svg)](http://www.apache.org/licenses/LICENSE-2.0.html)
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/actuator/pSlip)](https://github.com/actuator/pSlip/releases)
 [![GitHub stars](https://img.shields.io/github/stars/actuator/pSlip)](https://github.com/actuator/pSlip/stargazers)
@@ -9,19 +8,29 @@
 
 ---
 
-## What’s New (v1.1.3)
+## What’s New (v1.1.5)
 
-### **Modernized HTML Report**
-A new flat, responsive layout improves readability, spacing, and dark-mode rendering.  
-The Findings Index now adapts automatically between a desktop table and mobile card layout.
+### **Segment Write Key Detection**
+pSlip now detects hardcoded Segment write keys during code/config triage.
+
+Detection is case-insensitive and catches common Java/Kotlin and JSON/config patterns, including:
+
+```java
+SEGMENT_WRITE_KEY = "..."
+segment_write_key = "..."
+```
+
+```json
+"segmentWriteKey": "..."
+```
 
 ### **Category Summaries**
-Reports now include summaries for:
+Reports include summaries for:
 **Hardening**, **Component Exposure**, **Crypto**, **JavaScript Injection**,  
-**URL Redirect**, **Permissions**, and **Tapjacking**.
+**URL Redirect**, **Permissions**, **Tapjacking**, and **Secrets**.
 
 ### **Updated Severity Model (Android 15)**
-Severity weights now reflect realistic exploitability under modern Android.  
+Severity weights reflect realistic exploitability under modern Android.  
 Tapjacking is treated as **Informational** unless paired with sensitive UI actions.
 
 ### **Cleaner Detail Sections**
@@ -29,13 +38,10 @@ Improved formatting for component names, ADB PoC commands, severity chips,
 and long package paths.
 
 ### **Unified CLI (Simpler Flags!)**
-Scanning behavior has been simplified into two modes:
+Scanning behavior is simplified into two modes:
 
-- `-all` → Full analysis  
-- `-allsafe` → Full analysis without AES/JADX decompilation  
-
-Legacy toggles (`-p`, `-perm`, `-js`, `-call`, `-aes`, `-taptrap`) no longer appear  
-and no longer need to be managed individually.
+- `-all` → Full analysis
+- `-allsafe` → Full analysis without AES/JADX decompilation
 
 ---
 
@@ -43,13 +49,14 @@ and no longer need to be managed individually.
 
 **pSlip** detects Android applications vulnerable to **Permission-Slip / Confused-Deputy** paths by analyzing:
 
-- exported Activities, Services, BroadcastReceivers, Providers  
-- intent filters and unsafe CALL/VIEW handlers  
-- JavaScript-enabled WebViews and URL schemes  
-- manifest hardening controls  
-- unsafe permissions and custom-role exposure  
-- tapjacking/taptrap surface area  
+- exported Activities, Services, BroadcastReceivers, Providers
+- intent filters and unsafe CALL/VIEW handlers
+- JavaScript-enabled WebViews and URL schemes
+- manifest hardening controls
+- unsafe permissions and custom-role exposure
+- tapjacking/taptrap surface area
 - cryptographic misuse (AES/IV/key/ECB detection)
+- hardcoded secrets such as Segment write keys
 
 pSlip is designed for **application-security testing**, **CI/CD pipelines**, and **bulk APK triage**.
 
@@ -58,23 +65,25 @@ pSlip is designed for **application-security testing**, **CI/CD pipelines**, and
 ## Highlights
 
 ### Exported Component Triage
-- CALL actions  
-- VIEW + `javascript:` handlers  
-- Wildcard deep links  
+- CALL actions
+- VIEW + `javascript:` handlers
+- Wildcard deep links
 - Weak or normal-protection custom permissions
 
-### Crypto & Code Triage
-- Hardcoded AES/DES/IV patterns  
+### Crypto, Secrets & Code Triage
+- Hardcoded AES/DES/IV patterns
 - Unsafe mode detection (ECB, static IVs, insecure PRNG)
+- Hardcoded Segment write-key detection
+- Case-insensitive secret-name matching for common config styles
 
 ### UI / Tapjacking Detection
-- Layout XML parsing  
-- Compose tree heuristics  
+- Layout XML parsing
+- Compose tree heuristics
 - Sensitive-action token scoring
 
 ### Reporting
-- HTML and JSON output  
-- ADB PoC generation  
+- HTML and JSON output
+- ADB PoC generation
 - Severity + confidence scoring (0–100)
 
 ---
@@ -89,7 +98,7 @@ pSlip is designed for **application-security testing**, **CI/CD pipelines**, and
 git clone https://github.com/actuator/pSlip.git
 cd pSlip
 sudo apt install apktool jadx
-````
+```
 
 ---
 
@@ -105,12 +114,38 @@ python pSlip.py path/to/apks -allsafe -html report.htm
 
 ### Supported Flags
 
-```
--all                   Full analysis (includes AES/JADX)
--allsafe               Disable AES/JADX for speed/stability
+```text
+-all                   Full analysis, including code/config triage
+-allsafe               Disable AES/JADX/code decompilation for speed/stability
 -html <file>           Write HTML report
 -json <file>           Write JSON report
 -aes-timeout <minutes> Time limit for AES/JADX work (default: 5)
+```
+
+---
+
+## Secret Detection
+
+pSlip detects hardcoded Segment write keys in Java, Kotlin, JSON, XML, JavaScript, TypeScript, properties, text, and smali outputs.
+
+Examples detected:
+
+```java
+private static final String SEGMENT_WRITE_KEY = "pHYN1qhsRsz...
+```
+
+```json
+{
+  "segmentWriteKey": "CaVz3hRhBJKCNlParpK4kvWJLNUf164N"
+}
+```
+
+Matches are reported as:
+
+```text
+Issue Type: Hardcoded Segment Write Key
+Severity: High
+Confidence: 95
 ```
 
 ---
@@ -119,10 +154,9 @@ python pSlip.py path/to/apks -allsafe -html report.htm
 
 ![pSlipVideo2](https://github.com/user-attachments/assets/f6481a73-11f9-4989-b4c0-b0eca4e780f1)
 
-
 Tokens used for semantic scoring:
 
-```
+```text
 login | auth | verify | pay | checkout | approve
 password | otp | pin | confirm | secure
 submit | card | transfer | send
@@ -134,13 +168,12 @@ submit | card | transfer | send
 
 ### **HTML Output**
 
-* Category summaries (Hardening, Exposure, Crypto, JS Injection, URL Redirect, Permissions, Tapjacking)
-* Responsive index (table on desktop, cards on mobile)
-* Per-app findings with severity, confidence, and ADB PoC actions
+- Category summaries: Hardening, Exposure, Crypto, Secrets, JS Injection, URL Redirect, Permissions, Tapjacking
+- Responsive index: table on desktop, cards on mobile
+- Per-app findings with severity, confidence, and ADB PoC actions
 
 ### **JSON Output**
 
-* Structured dataset for automation or SIEM ingestion
+- Structured dataset for ingestion
 
 <img src="https://github.com/user-attachments/assets/036ab34d-4f37-43fa-934b-eb7c528843fd" />
-
