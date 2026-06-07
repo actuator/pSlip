@@ -22,17 +22,14 @@ The same app that used to time out now finishes in well under a minute with no J
 
 ### OAuth scheme-hijack detection (always on)
 
-pSlip flags exported components that own an OAuth redirect (a custom scheme or an `https` app link) and reports the leaked `client_id`, the claimable redirect, and the runtime preconditions an attacker still has to confirm before claiming impact. It also catches the Google "Web application" misconfiguration where an Android app ships a `client_secret` in the APK (the wrong OAuth client type), and it pulls cross-platform client_ids out of the DEX. Detection runs by default. Buildable PoC project generation is behind `-oauth-poc`.
+pSlip flags exported components that own an OAuth redirect (a custom scheme or an `https` app link) and reports the leaked `client_id`, the claimable redirect, and the runtime preconditions an attacker still has to confirm before claiming impact. 
 See https://actuator.sh/blog/2026-08-the-wrong-dropdown.html
+It also catches the Google "Web application" misconfiguration where an Android app ships a `client_secret` in the APK (the wrong OAuth client type), and it pulls cross-platform client_ids out of the DEX. Detection runs by default. Buildable PoC project generation is behind `-oauth-poc`.
 
 
 ### Split-APK containers
 
 `.xapk`, `.apks`, and `.apkm` bundles are expanded automatically. The base/code APK is analyzed and config/resource splits are skipped.
-
-### Faster, parallel crypto pass
-
-The AES pass analyzes multiple APKs at once with a bounded worker pool and a per-APK timeout, so one slow or malformed app cannot stall a batch.
 
 ### Windows: zero-setup dependencies
 
@@ -41,7 +38,6 @@ On a fresh Python install pSlip bootstraps its Python dependencies (tqdm, androg
 ### Clearer environment banner and tool overrides
 
 The startup banner shows which engine is doing what. If jadx or apktool live somewhere off PATH, point pSlip at them with `-jadx <path>` / `-apktool <path>` (or the matching env vars). A tool failing is now reported with the real reason instead of a bare exit code.
-
 ---
 
 ## Previously (v1.1.5)
