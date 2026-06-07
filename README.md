@@ -8,7 +8,9 @@
 
 ---
 
-## What's New (v1.3.0)
+## What's New (v1.3.5)
+
+
 
 ### androguard is now the primary engine (no Java required)
 
@@ -20,10 +22,10 @@ It now cross-references `SecretKeySpec`, `IvParameterSpec`, and `Cipher`, then b
 
 The same app that used to time out now finishes in well under a minute with no Java involved. If you need keys that are assembled across branches or loaded from static fields, `-aes-deep` runs the old jadx/apktool source pass.
 
-### OAuth scheme-hijack detection (always on)
+### OAuth scheme-hijack detection
 
-pSlip flags exported components that own an OAuth redirect (a custom scheme or an `https` app link) and reports the leaked `client_id`, the claimable redirect, and the runtime preconditions an attacker still has to confirm before claiming impact. 
-See https://actuator.sh/blog/2026-08-the-wrong-dropdown.html
+pSlip flags exported components that own an OAuth redirect (a custom scheme or an `https` app link) and reports the leaked `client_id`, the claimable redirect, and the runtime preconditions an attacker still has to confirm before claiming impact.
+
 It also catches the Google "Web application" misconfiguration where an Android app ships a `client_secret` in the APK (the wrong OAuth client type), and it pulls cross-platform client_ids out of the DEX. Detection runs by default. Buildable PoC project generation is behind `-oauth-poc`.
 
 
@@ -181,6 +183,8 @@ Details:    Hardcoded AES key (32 bytes, AES-256) recovered from DEX bytecode.
 
 `-aes-deep` switches to the jadx/apktool path, which decompiles to Java/smali and runs the source-level scanner. It is slower and needs Java, but it can resolve keys the linear bytecode model does not, such as keys built across branches or read from a static field.
 
+The linear bytecode backtrace is intraprocedural by design. Keys assembled across basic blocks or read from a static field are left to `-aes-deep`.
+
 ---
 
 ## OAuth Detection
@@ -188,6 +192,8 @@ Details:    Hardcoded AES key (32 bytes, AES-256) recovered from DEX bytecode.
 pSlip looks for exported components that handle an OAuth redirect, either a custom scheme or an `https` app link. When it finds one it reports the provider, the leaked `client_id`, the redirect a rogue app could claim, and the set of preconditions that are not provable from the APK and must be confirmed at runtime before claiming impact.
 
 It also detects the Google "Web application" mistake, where an app is registered with the confidential client type and ships the `client_secret` inside the APK. In that case the secret is reported (redacted in the report, full value only in a generated PoC), and the token exchange recipe is described for the right client type.
+
+[See https://actuator.sh/blog/2026-08-the-wrong-dropdown.html]
 
 Detection runs by default as part of `-all`. Add `-oauth-poc` (optionally with `-oauth-poc-dir <dir>`) to also write buildable PoC projects.
 
@@ -228,4 +234,3 @@ Confidence: 95
 - Per-app findings with severity, confidence, and ADB PoC actions
 
 <img src="https://github.com/actuator/pSlip/blob/main/pslip.gif" alt="pSlip-demo" />
-
