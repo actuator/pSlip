@@ -16,8 +16,6 @@ Manifest parsing, OAuth analysis, and AES/DES/IV detection all run on androguard
 
 ### AES/DES/IV detection rewritten on DEX bytecode
 
-The crypto pass used to shell out to jadx and decompile the whole app to Java. On large APKs that was a problem: a 78MB app would blow past the AES timeout and get skipped, so its keys were never found at all.
-
 It now cross-references `SecretKeySpec`, `IvParameterSpec`, and `Cipher`, then backtraces the key/IV register to its constant source. A byte array key can never be a bare string literal, so a value is only reported if it actually reaches the constructor through `getBytes()` or an array literal. That provenance rule kills the usual false positives (algorithm names like `AES`, KDF names like `PBKDF2WithHmacSHA1`, stray exception strings). Every finding includes the recovered value, the key size, the cipher transform, and the `const -> getBytes -> init` chain, so it is ready to drop into a report.
 
 The same app that used to time out now finishes in well under a minute with no Java involved. If you need keys that are assembled across branches or loaded from static fields, `-aes-deep` runs the old jadx/apktool source pass.
@@ -25,6 +23,8 @@ The same app that used to time out now finishes in well under a minute with no J
 ### OAuth scheme-hijack detection (always on)
 
 pSlip flags exported components that own an OAuth redirect (a custom scheme or an `https` app link) and reports the leaked `client_id`, the claimable redirect, and the runtime preconditions an attacker still has to confirm before claiming impact. It also catches the Google "Web application" misconfiguration where an Android app ships a `client_secret` in the APK (the wrong OAuth client type), and it pulls cross-platform client_ids out of the DEX. Detection runs by default. Buildable PoC project generation is behind `-oauth-poc`.
+See https://actuator.sh/blog/2026-08-the-wrong-dropdown.html
+
 
 ### Split-APK containers
 
