@@ -35,9 +35,6 @@ It also catches the Google "Web application" misconfiguration where an Android a
 
 On a fresh Python install pSlip bootstraps its Python dependencies (tqdm, androguard) and re-runs itself. Set `PSLIP_NO_AUTOINSTALL=1` to turn that off.
 
-### Clearer environment banner and tool overrides
-
-The startup banner shows which engine is doing what. If jadx or apktool live somewhere off PATH, point pSlip at them with `-jadx <path>` / `-apktool <path>` (or the matching env vars). A tool failing is now reported with the real reason instead of a bare exit code.
 ---
 
 ## Previously (v1.1.5)
