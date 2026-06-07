@@ -370,6 +370,32 @@ def _rmtree(path):
             pass
 
 
+def _sweep_stale_temp(max_age_minutes=30):
+    """Reclaim leaked container-extraction dirs from prior crashed runs.
+
+    gather_apk_inputs extracts .xapk/.apks/.apkm into a tempfile.mkdtemp under
+    the system temp dir. If a run crashes before its end-of-run cleanup, that
+    dir (often gigabytes of extracted APKs) leaks. Across many crashed runs the
+    temp drive fills, after which new extractions silently fail and containers
+    drop out of the scan. This best-effort sweep removes pslip_xapk_* dirs that
+    have not been touched in max_age_minutes, so an actively running concurrent
+    extraction is left alone while stale leaks are cleared."""
+    try:
+        import tempfile as _tf
+        import glob as _glob
+        import time as _time
+        base = _tf.gettempdir()
+        cutoff = _time.time() - max_age_minutes * 60
+        for d in _glob.glob(os.path.join(base, "pslip_xapk_*")):
+            try:
+                if os.path.isdir(d) and os.path.getmtime(d) < cutoff:
+                    _rmtree(d)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _tool_status():
     """Detect optional external tools on this platform. androguard (Python) is
     the primary engine for manifest + OAuth analysis; apktool/jadx are only
@@ -447,13 +473,22 @@ BANNER = f"""
 ██║     ███████║███████╗██║██║     
 ╚═╝     ╚══════╝╚═╝╚═╝                                                  
 {RESET}{BOLD}
-Version 1.3.0 | https://actuator.sh/
+Version 1.3.5 | https://actuator.sh/
 {RESET}
 """
 
 def print_help():
     print(BANNER)
     print(textwrap.dedent(f"""\
+        {BOLD}What it does:{RESET}
+        Static analyzer for Android APKs and split bundles (.xapk/.apks/.apkm).
+        Flags, each with a PoC:
+          - exported components / ContentProviders; unsafe CALL, VIEW+javascript:, wildcard deep links
+          - manifest hardening (cleartext, allowBackup, debuggable)
+          - OAuth redirect scheme-hijack, incl. client_secret shipped in the APK
+          - hardcoded AES/DES keys and IVs (DEX bytecode)
+        androguard-based, no Java; jadx/apktool only for -aes-deep.
+
         {BOLD}Usage:{RESET} python pSlip.py <apk/xapk/apks/apkm or directory> [-all] [-allsafe] [-html <output_file>] [-json <output_file>] [-oauth-poc]
 
         {BOLD}Inputs:{RESET}
@@ -463,8 +498,13 @@ def print_help():
         config / ABI / resource-only splits are skipped.
 
         {BOLD}Scan Modes:{RESET}
-        -all              Run full analysis, including AES/DES key scanning
-        -allsafe          Run full analysis but skip AES/DES key scanning (faster & safer)
+        -all              Run full analysis, including the AES/DES/IV key pass
+        -allsafe          Run full analysis but skip the AES/DES/IV key pass (faster)
+        -aes-deep         Run the key pass via jadx/apktool source decompilation
+                          instead of the default androguard DEX bytecode scan.
+                          Slower and needs jadx or apktool, but can resolve keys
+                          assembled across branches or loaded from static fields.
+        -aes-timeout <m>  Per-APK time limit for the key pass, in minutes (default 5)
 
         {BOLD}OAuth scheme-hijack:{RESET}
         (detection is always-on; no flag needed to find OAuth scheme-hijack issues)
@@ -2814,17 +2854,27 @@ def run_aes_with_timeout(apk_file, pkg_name, timeout_seconds):
     # Drain the queue with a bounded get BEFORE join. Reading first avoids the
     # get_nowait()-after-join race that can silently drop valid AES findings,
     # and avoids a large-payload feeder-pipe deadlock.
+    import time as _time
+    import queue as _queue
     result = []
-    timed_out = False
+    status = 'ok'          # 'ok' | 'timeout' | 'worker_error'
+    t_start = _time.monotonic()
     try:
         try:
             result = q.get(timeout=timeout_seconds)
-        except Exception:
-            # No result within the window: worker is hung or crashed.
+        except _queue.Empty:
+            # Genuinely waited the full window with no result: hung/slow analysis.
             result = []
-            timed_out = True
+            status = 'timeout'
+        except Exception:
+            # Queue/pipe error or the worker died abnormally (crash, OOM-kill).
+            # This is NOT a timeout and usually happens fast, so it must not be
+            # reported as "exceeded N minutes" - that message was misleading.
+            result = []
+            status = 'worker_error'
 
-        if timed_out:
+        if status != 'ok':
+            elapsed = _time.monotonic() - t_start
             # Do not wait further on a worker that missed its window; terminate
             # promptly so a hung decode costs at most ~timeout, not timeout+join.
             if p.is_alive():
@@ -2834,8 +2884,13 @@ def run_aes_with_timeout(apk_file, pkg_name, timeout_seconds):
                     pass
             p.join(5)
             try:
-                print(f"{YELLOW}AES analysis exceeded {timeout_seconds // 60} minutes "
-                      f"on '{apk_file}'. Skipping and continuing.{RESET}")
+                if status == 'timeout':
+                    print(f"{YELLOW}AES analysis exceeded {timeout_seconds // 60} min "
+                          f"on '{apk_file}'. Skipping and continuing.{RESET}")
+                else:
+                    print(f"{YELLOW}AES analysis worker exited early after "
+                          f"~{int(elapsed)}s (not a timeout) on '{apk_file}'. "
+                          f"Skipping and continuing.{RESET}")
             except Exception:
                 pass
             return []
@@ -2861,7 +2916,7 @@ def run_aes_with_timeout(apk_file, pkg_name, timeout_seconds):
 
 
 # ============================================================
-# OAuth scheme-hijack engine (ported verbatim from bloodOath_active / b19)
+# OAuth scheme-hijack engine.
 # Detection is always-on; PoC generation is gated behind -oauth-poc.
 # ============================================================
 
@@ -2910,7 +2965,7 @@ OAUTH_PROVIDERS = [
 
 
 _FIREBASE_SHARED_PROJECT_NUMBERS = frozenset({
-    '764086051850',   # Firebase default (most common — seen in 50+ apps)
+    '764086051850',   # Firebase default (most common - seen in 50+ apps)
     '574395421659',   # Firebase Auth fallback
     '176963608412',   # Firebase legacy
     '680741426986',   # Firebase Emulator Suite
@@ -2973,7 +3028,7 @@ def extract_package_from_axml(manifest_bytes):
 
     The <manifest> tag is always the first START_ELEMENT.  Its 'package'
     attribute value is the app's package name.  We parse just enough of
-    the AXML to read that one attribute — no full tree walk needed.
+    the AXML to read that one attribute - no full tree walk needed.
     """
     import struct
 
@@ -3069,7 +3124,7 @@ def extract_package_from_axml(manifest_bytes):
                             return strings[tv_data]
                 return None  # <manifest> found but no package attr
 
-            # First START_ELEMENT wasn't <manifest> — shouldn't happen, bail
+            # First START_ELEMENT wasn't <manifest> - shouldn't happen, bail
             break
 
         off += c_size
@@ -3084,7 +3139,7 @@ def _dedup_generic_findings(findings):
     A single activity commonly has multiple <data> elements with the SAME scheme
     (one per path, e.g. /normal and /magiclink), and the manifest scan emits one
     finding per <data> element. Collapse to one finding per
-    (type, scheme, activity) — keeping the entry with the most informative path.
+    (type, scheme, activity) - keeping the entry with the most informative path.
     """
     best = {}
     order = []
@@ -3111,9 +3166,9 @@ def _dedup_providers(providers):
     Deduplicate found_providers list.
 
     Two passes:
-      1. Exact dedup — same (provider, client_id) pair appearing multiple times
+      1. Exact dedup - same (provider, client_id) pair appearing multiple times
          due to the same string in classes.dex + classes2.dex + classes3.dex.
-      2. Firebase shared client_id filter — project numbers registered to Google's
+      2. Firebase shared client_id filter - project numbers registered to Google's
          own infrastructure; not exploitable as scheme hijack targets.
     """
     seen = set()
@@ -3123,11 +3178,11 @@ def _dedup_providers(providers):
         cid = p.get('client_id', '')
         project_number = cid.split('-')[0] if '-' in cid else ''
 
-        # Firebase shared project — skip entirely
+        # Firebase shared project - skip entirely
         if project_number in _FIREBASE_SHARED_PROJECT_NUMBERS:
             continue
 
-        # Exact duplicate (provider + client_id) — keep first occurrence only
+        # Exact duplicate (provider + client_id) - keep first occurrence only
         key = (p.get('provider', ''), cid)
         if key in seen:
             continue
@@ -3275,7 +3330,7 @@ def _score_confidence(provider):
     Returns (confidence_tier, [unverified_preconditions]) for a provider finding.
 
     The tier reflects how much of the attack is statically provable.  The
-    precondition list names exactly what the POC run must confirm — these are the
+    precondition list names exactly what the POC run must confirm - these are the
     residual false-positive sources that NO static analysis can eliminate.
     """
     preconditions = []
@@ -3323,7 +3378,7 @@ def _score_confidence(provider):
     # --- Recoverable redirect URI: required for the /token request to validate ---
     if is_cross and not has_redirect:
         preconditions.append(
-            'Exact registered redirect_uri (scheme://host/path) — only scheme:/ was '
+            'Exact registered redirect_uri (scheme://host/path) - only scheme:/ was '
             'recovered from DEX; AS will reject if a path was registered')
 
     # --- Tier assignment ---
@@ -3332,10 +3387,10 @@ def _score_confidence(provider):
         # intercept the code but cannot redeem it.
         tier = CONFIDENCE_LOW
     elif is_cross and not has_redirect:
-        # Cross-platform with no usable redirect URI — POC likely fails at /token.
+        # Cross-platform with no usable redirect URI - POC likely fails at /token.
         tier = CONFIDENCE_LOW
     elif is_cross:
-        # Cross-platform with recoverable redirect — depends on cross-client acceptance.
+        # Cross-platform with recoverable redirect - depends on cross-client acceptance.
         tier = CONFIDENCE_MEDIUM
     elif redirect_known:
         # Manifest-registered scheme with a complete redirect (recovered host, or
@@ -3356,8 +3411,8 @@ def extract_oauth_providers(manifest_bytes):
            e.g. com.googleusercontent.apps.CLIENT_ID -> active flow defeats PKCE
     
     Tier 2 (HIGH): AppAuth/OAuth indicators + any custom scheme found
-           e.g. xfinitydigitalhome://, com.washingtonpost.classic://
-           Passive interception (original bloodOath detection)
+           e.g. exampleappauth://, com.example.app.client://
+           Passive interception of the app's own redirect scheme
     
     Returns: (providers_list, generic_findings_list, app_schemes_set)
     """
@@ -3390,7 +3445,7 @@ def extract_oauth_providers(manifest_bytes):
                 })
 
     # ================================================================
-    # TIER 2: General AppAuth/OAuth detection (ported from bloodOath)
+    # TIER 2: General AppAuth/OAuth detection
     # ================================================================
 
     # Step A: Check for OAuth redirect indicators
@@ -3419,7 +3474,7 @@ def extract_oauth_providers(manifest_bytes):
     callback_schemes = set()   # scheme://callback pattern (strongest)
     all_schemes = set()        # any scheme:// pattern (filtered)
     meta_scheme_keys = set()   # APP_AUTH_REDIRECT_SCHEME etc.
-    standalone_schemes = set() # single-word schemes like "xfinitydigitalhome"
+    standalone_schemes = set() # single-word app-specific schemes (e.g. "exampleappauth")
 
     noise_words = {
         'scheme', 'string', 'android', 'layout', 'intent', 'action',
@@ -3430,7 +3485,7 @@ def extract_oauth_providers(manifest_bytes):
         'datadog', 'branch', 'appsflyer', 'adjust', 'xmlns', 'default',
         'browsable', 'launcher', 'version', 'package', 'backup', 'meta',
         'data', 'queries', 'supports', 'screens', 'uses', 'true', 'false',
-        # SDK placeholder / internal redirect schemes — not the app's own OAuth flow
+        # SDK placeholder / internal redirect schemes - not the app's own OAuth flow
         'genericidp', 'identityprovider', 'genericprovider', 'idpredirect',
         'authprovider', 'oauthprovider',
         # Third-party SDK schemes
@@ -3439,8 +3494,8 @@ def extract_oauth_providers(manifest_bytes):
     }
 
     # Packages that appear in manifests but are NOT the app's own OAuth schemes.
-    # Built from real scan FPs: Transferwise (100+ VPN/root pkgs), Asana (MSAL),
-    # Ecwid (TikTok SDK), Yahoo Finance (Taboola ad SDK).
+    # Built from real scan false positives: VPN/root-detection package lists,
+    # Microsoft MSAL, and third-party social/ad SDK redirect schemes.
     EXCLUDED_PKG_PREFIXES = (
         # Platforms & social SDKs
         'com.google.', 'com.android.', 'com.facebook.', 'com.instagram.',
@@ -3623,8 +3678,8 @@ def extract_oauth_providers(manifest_bytes):
     # Fallback: use package-affinity scoring ONLY if the actual AppAuth
     # RedirectUriReceiverActivity is present. The generic string "appauth"
     # alone (from library names/deps) is too weak for the fallback path.
-    # This kills Transferwise (has "appauth" but no RedirectUriReceiverActivity)
-    # while keeping Backblaze, WashPost, Xfinity (all have the activity).
+    # Requiring the activity avoids false positives from apps that merely ship
+    # the AppAuth library string without an exported redirect receiver.
     has_redirect_activity = 'redirecturireceiveractivit' in all_text_lower
     if has_redirect_activity and not oauth_schemes:
         # Score each candidate by how unique its org prefix is
@@ -3659,7 +3714,7 @@ def extract_oauth_providers(manifest_bytes):
     for scheme in oauth_schemes:
         if scheme.lower() not in ('https', 'http'):
             # Skip if already covered by a provider detection (exact scheme match,
-            # not substring — 'com.googleusercontent' must not match the full provider scheme)
+            # not substring - 'com.googleusercontent' must not match the full provider scheme)
             already_covered = any(scheme == p['scheme'] for p in found_providers)
             if not already_covered:
                 if scheme in callback_schemes:
@@ -3745,7 +3800,7 @@ def extract_oauth_providers_androguard(apk_path):
 
     # Third-party SDK activity-class namespaces. When the redirect receiver lives
     # in one of these packages it is the SDK's own internal redirect handler, not
-    # the host app's OAuth flow — claiming its scheme hijacks the SDK on its own
+    # the host app's OAuth flow - claiming its scheme hijacks the SDK on its own
     # behalf, not the app's account session. These flooded v3.0 results:
     #   com.google.firebase.auth.internal.RecaptchaActivity  (scheme=recaptcha)
     #   com.stripe.android.financialconnections...RedirectActivity (scheme=stripe)
@@ -3765,7 +3820,7 @@ def extract_oauth_providers_androguard(apk_path):
 
     def _is_sdk_activity(activity_class):
         # net.openid.appauth shell IS the app's own OAuth redirect receiver (AppAuth
-        # is how the app does OAuth), so it must NOT be excluded — only genuine
+        # is how the app does OAuth), so it must NOT be excluded - only genuine
         # third-party-SDK redirect receivers are.
         if activity_class.startswith('net.openid.appauth'):
             return False
@@ -3779,7 +3834,7 @@ def extract_oauth_providers_androguard(apk_path):
         if exported != 'true':
             continue
 
-        # Skip third-party SDK redirect receivers (recaptcha/stripe/plaid/etc) —
+        # Skip third-party SDK redirect receivers (recaptcha/stripe/plaid/etc) - 
         # not the host app's OAuth flow.
         if _is_sdk_activity(name):
             continue
@@ -3821,7 +3876,7 @@ def extract_oauth_providers_androguard(apk_path):
                     continue
 
                 # --- Scheme sanity gates ---
-                # Gate 1: Resource reference — unresolved @7F... string resource.
+                # Gate 1: Resource reference - unresolved @7F... string resource.
                 # Androguard sometimes returns the raw resource ID instead of the
                 # resolved string value when the APK's resources.arsc is obfuscated.
                 # These are never valid OAuth redirect schemes.
@@ -3830,7 +3885,7 @@ def extract_oauth_providers_androguard(apk_path):
 
                 # Gate 2: SDK placeholder and third-party SDK schemes.
                 # These are registered by identity/payment SDKs as templates or
-                # internal redirects — not exploitable as the target app's OAuth flow.
+                # internal redirects - not exploitable as the target app's OAuth flow.
                 SDK_PLACEHOLDER_SCHEMES = {
                     # Third-party SDK redirect schemes (not the app's own OAuth flow).
                     # These flooded v3.0 results via SDK redirect-receiver activities.
@@ -3893,7 +3948,7 @@ def extract_oauth_providers_androguard(apk_path):
                 is_oauth_activity = any(kw in name_lower for kw in OAUTH_ACTIVITY_KEYWORDS)
 
                 if is_oauth_activity:
-                    # autoVerify=true means the OS enforces App Links verification —
+                    # autoVerify=true means the OS enforces App Links verification - 
                     # a competing app cannot register the same scheme.  Not hijackable;
                     # skip entirely to avoid FPs.
                     if auto_verify == 'true':
@@ -3904,7 +3959,7 @@ def extract_oauth_providers_androguard(apk_path):
 
                     # Detect prefix-style redirect_uri validation risk.
                     # If the manifest registers scheme://host/some/path, many AS
-                    # implementations validate by prefix — so scheme://host/some/path/../../attacker
+                    # implementations validate by prefix - so scheme://host/some/path/../../attacker
                     # or scheme://host/some/path.evil also pass.
                     # Flag when there is a non-trivial path so the POC can try variations.
                     has_path_prefix_risk = bool(redirect_path and len(redirect_path) > 1)
@@ -3929,13 +3984,13 @@ def extract_oauth_providers_androguard(apk_path):
                 #   (b) host/path contains an OAuth keyword, OR
                 #   (c) scheme is a reverse-domain (3+ components), OR
                 #   (d) scheme shares a distinctive token with the app's package name
-                #       (e.g. package com.xfinity.digitalhome -> scheme xfinitydigitalhome)
-                # Without any signal this is just a deep link — skip to avoid INFO noise.
+                #       (e.g. package com.example.app -> scheme exampleapp)
+                # Without any signal this is just a deep link - skip to avoid INFO noise.
                 #
-                # GROUND TRUTH regression guard: this gate must never suppress the
-                # confirmed-vulnerable findings:
-                #   com.xfinity.digitalhome      scheme=xfinitydigitalhome   (package-affinity)
-                #   com.washingtonpost.rainbow   scheme=com.washingtonpost.rainbow.android (reverse-domain 4-part)
+                # Regression guard: this gate must never suppress the two shapes
+                # that are genuine app-owned redirects:
+                #   com.example.app   scheme=exampleapp                 (package-affinity)
+                #   com.example.app   scheme=com.example.app.android    (reverse-domain 4-part)
                 scheme_lower = scheme.lower()
                 host_path_lower = (host + redirect_path).lower()
                 OAUTH_SCHEME_KEYWORDS = ('oauth', 'auth', 'callback', 'redirect', 'login',
@@ -3950,13 +4005,13 @@ def extract_oauth_providers_androguard(apk_path):
                 )
                 # Package affinity: does the scheme contain a distinctive component of
                 # the package name?  Catches app-specific single-word schemes that are
-                # the app's own OAuth redirect (xfinitydigitalhome <- com.xfinity.digitalhome)
+                # the app's own OAuth redirect (exampleapp <- com.example.app)
                 # without flagging generic SDK schemes (which don't echo the package).
                 pkg_tokens = [t for t in package.lower().split('.')
                               if len(t) >= 4 and t not in (
                                   'com', 'org', 'net', 'app', 'android', 'mobile',
                                   'free', 'pro', 'lite', 'plus')]
-                # Concatenated package tail (e.g. 'xfinitydigitalhome') and individual tokens
+                # Concatenated package tail (e.g. 'exampleapp') and individual tokens
                 scheme_alnum = re.sub(r'[^a-z0-9]', '', scheme_lower)
                 has_pkg_affinity = False
                 if pkg_tokens:
@@ -3971,10 +4026,10 @@ def extract_oauth_providers_androguard(apk_path):
 
                 if not (has_scheme_signal or has_hostpath_signal or
                         is_reverse_domain or has_pkg_affinity):
-                    continue  # No corroborating signal — skip; deep link FP
+                    continue  # No corroborating signal - skip; deep link FP
 
                 if auto_verify == 'true':
-                    continue  # App Links — not hijackable
+                    continue  # App Links - not hijackable
 
                 generic_findings.append({
                     'type': 'CUSTOM_BROWSABLE_SCHEME',
@@ -3982,24 +4037,24 @@ def extract_oauth_providers_androguard(apk_path):
                     'scheme': scheme,
                     'redirect_host': host,
                     'redirect_path': redirect_path,
-                    'detail': f'{name} (exported=true, custom BROWSABLE scheme, no OAuth keywords — verify manually)',
+                    'detail': f'{name} (exported=true, custom BROWSABLE scheme, no OAuth keywords - verify manually)',
                     'indicators': [f'activity={name}', 'structural parse'],
                     'activity': name,
                     'autoVerify': False,
                 })
 
     # --- WebView deeplink chain detection ---
-    # Case Study 1 (Djini article): an exported activity accepts a deeplink whose
+    # Pattern: an exported activity accepts a deeplink whose
     # target URL comes from a query/path parameter and loads it in an embedded
     # WebView. If the WebView lacks strict URL validation it becomes an open redirect
     # that can be used to deliver an OAuth authorize URL in the context of the
-    # victim app's cookies — enabling prompt=none silent ATO without any user interaction.
+    # victim app's cookies - enabling prompt=none silent ATO without any user interaction.
     #
     # Detection heuristic: exported activity with a BROWSABLE intent-filter that
     # has an http/https scheme (or no scheme) AND whose name or the filter's data
     # host/path contains URL-parameter keywords (url, link, redirect, target, next).
     #
-    # We record these as CHAIN findings — not standalone vulns, but high-value
+    # Recorded as CHAIN findings - not standalone vulns, but high-value
     # combinators when an OAuth scheme hijack is already present.
     URL_PARAM_KEYWORDS = ('url', 'link', 'redirect', 'target', 'next', 'navigate',
                           'goto', 'return', 'returnurl', 'returnto', 'continue',
@@ -4049,12 +4104,12 @@ def extract_oauth_providers_androguard(apk_path):
                         })
 
     # Only surface webview chains when a HIGH/CRITICAL OAuth finding is already
-    # present — the deeplink is a delivery vehicle, not a standalone vuln, and
+    # present - the deeplink is a delivery vehicle, not a standalone vuln, and
     # coupling it to an INFO-tier custom-scheme note would over-promote noise.
     _has_real_finding = bool(found_providers) or any(
         f.get('severity') in ('HIGH', 'CRITICAL') for f in generic_findings)
     if webview_deeplinks and _has_real_finding:
-        # Dedup by (activity, host, path) and cap — apps commonly declare many
+        # Dedup by (activity, host, path) and cap - apps commonly declare many
         # http/https deeplink filters; one chain note per distinct target is enough.
         _wv_seen = set()
         _wv_count = 0
@@ -4074,7 +4129,7 @@ def extract_oauth_providers_androguard(apk_path):
                 'redirect_path': wv['path'],
                 'detail': (
                     f"{wv['activity']} (exported=true, BROWSABLE http/https deeplink, "
-                    f"URL-param signal: {wv['signal']}) — potential delivery vehicle "
+                    f"URL-param signal: {wv['signal']}) - potential delivery vehicle "
                     f"for OAuth authorize URL via embedded WebView"
                 ),
                 'indicators': [f"activity={wv['activity']}", 'webview_chain'],
@@ -4085,12 +4140,12 @@ def extract_oauth_providers_androguard(apk_path):
 
     logging.disable(logging.NOTSET)
 
-    # --- Cross-platform client_id detection (Djini technique) ---
+    # --- Cross-platform client_id detection ---
     # Scan DEX strings for Google client_ids NOT in the manifest.
     # These may be iOS/desktop client_ids that can be used on Android
     # to avoid scheme conflicts with the legitimate app.
     #
-    # PERF FIX: v3.1.1 — uses lightweight regex over raw DEX bytes instead
+    # PERF FIX: v3.1.1 - uses lightweight regex over raw DEX bytes instead
     # of androguard.misc.AnalyzeAPK which does full disassembly + xref
     # building (minutes per large APK).  We only need string matching,
     # so reading the DEX files as raw bytes and searching with regex is
@@ -4111,13 +4166,13 @@ def extract_oauth_providers_androguard(apk_path):
                         if any(short_id in cid for cid in manifest_client_ids):
                             continue
                         # Skip if already processed (same client_id repeats across DEX
-                        # files and many times within one DEX) — avoids redundant URI
+                        # files and many times within one DEX) - avoids redundant URI
                         # scans and a bloated pre-dedup list.
                         if short_id in _xp_seen:
                             continue
                         _xp_seen.add(short_id)
                         # Derive the redirect scheme this client_id would use.
-                        # Only report if NOT already registered in the manifest —
+                        # Only report if NOT already registered in the manifest - 
                         # a scheme collision with the legit app triggers a disambiguation
                         # dialog, which reduces exploitability significantly.
                         project_number = short_id.split('-')[0]
@@ -4128,7 +4183,7 @@ def extract_oauth_providers_androguard(apk_path):
                         if any(derived_scheme == ms for ms in manifest_schemes):
                             continue
                         # Scan DEX for the registered redirect URI for this client_id.
-                        # Google AS validates redirect_uri by exact match — scheme:/ alone
+                        # Google AS validates redirect_uri by exact match - scheme:/ alone
                         # will be rejected if the iOS/desktop client registered a path.
                         xp_host = ''
                         xp_path = ''
@@ -4178,7 +4233,7 @@ def generate_active_poc(package_name, providers, app_schemes, output_dir):
     """
     Generate an Android POC project with ACTIVE OAuth flow initiation.
     
-    Unlike bloodOath's passive POC (just claims scheme and waits),
+    Unlike the passive POC (which just claims the scheme and waits),
     this POC:
     1. Claims all vulnerable redirect schemes
     2. Has a UI button per provider to INITIATE the OAuth flow
@@ -4250,7 +4305,7 @@ def generate_active_poc(package_name, providers, app_schemes, output_dir):
         if p.get('_cross_platform'):
             # Cross-platform provider: redirect scheme is the iOS/desktop client's.
             # No app_scheme exists for it on Android. Use host/path recovered from
-            # the DEX URI scan — Google AS validates by exact match, so scheme:/
+            # the DEX URI scan - Google AS validates by exact match, so scheme:/
             # alone will be rejected if the client registered a full path.
             redirect_scheme = p['scheme']
             r_host = p.get('redirect_host', '')
@@ -4268,7 +4323,7 @@ def generate_active_poc(package_name, providers, app_schemes, output_dir):
         if r_host:
             redirect_uri = f'{redirect_scheme}://{r_host}{r_path}'
         else:
-            # No host found — scheme:/ is last resort; cross-platform POC will warn.
+            # No host found - scheme:/ is last resort; cross-platform POC will warn.
             redirect_uri = f'{redirect_scheme}:/'
         # Confidential (Web application) clients require the client_secret on the
         # code->token exchange. Pass the recovered value; if presence was detected
@@ -4316,7 +4371,7 @@ import java.util.*;
  * with attacker-controlled code_verifier/code_challenge.
  *
  * Target: {package_name}
- * Generated by bloodOath_active
+ * Generated by pSlip
  */
 public class ActiveOAuthActivity extends Activity {{
 
@@ -4458,7 +4513,7 @@ public class ActiveOAuthActivity extends Activity {{
         currentRedirectUri = provider.get("redirect_uri");
         currentClientSecret = provider.get("client_secret");
         if (currentRedirectUri.endsWith(":/")) {{
-            log("[!] WARNING: redirect_uri is scheme:/ only — no host/path found in DEX.");
+            log("[!] WARNING: redirect_uri is scheme:/ only - no host/path found in DEX.");
             log("[!] Google AS may reject this. Check the iOS/desktop client registration");
             log("[!] and update redirect_uri in addProvider() to the exact registered value.");
         }}
@@ -4855,15 +4910,15 @@ zipStorePath=wrapper/dists
 def generate_passive_poc(package_name, scheme, output_dir,
                          redirect_host='', redirect_path=''):
     """
-    Generate passive scheme-claim POC (same as original bloodOath).
+    Generate passive scheme-claim POC.
     Used when no provider Client ID is available.
 
     Returns None if the scheme is not a valid passive-hijack target
-    (http/https are claimed App Links, not private-use schemes — claiming them
+    (http/https are claimed App Links, not private-use schemes - claiming them
     does not intercept an OAuth redirect and floods the browser chooser).
     """
     # Guard: http/https are NOT private-use schemes. A passive scheme-claim POC
-    # against them is meaningless — the OS treats them as web links (App Links),
+    # against them is meaningless - the OS treats them as web links (App Links),
     # and a bare https filter with no host just makes the POC a candidate for
     # every https URL. Refuse to generate a broken POC.
     if scheme.lower() in ('http', 'https') or not scheme:
@@ -4998,11 +5053,11 @@ public class TokenCatcherActivity extends Activity {{
         if (key == null) return;
         String k = key.toLowerCase();
         if (k.equals("access_token") || k.equals("id_token") || k.equals("refresh_token")) {{
-            sb.append("  ^^^ BEARER CREDENTIAL — NOT PKCE-bound, directly replayable ^^^\\n");
+            sb.append("  ^^^ BEARER CREDENTIAL - NOT PKCE-bound, directly replayable ^^^\\n");
         }} else if (k.equals("code")) {{
-            sb.append("  ^^^ authorization code — only useful if PKCE absent/attacker-initiated ^^^\\n");
+            sb.append("  ^^^ authorization code - only useful if PKCE absent/attacker-initiated ^^^\\n");
         }} else if (k.equals("state")) {{
-            sb.append("  ^^^ state — required by some handlers (e.g. WaPo magic-link gate) ^^^\\n");
+            sb.append("  ^^^ state - required by some handlers (e.g. WaPo magic-link gate) ^^^\\n");
         }}
     }}
 }}'''
@@ -5049,18 +5104,18 @@ def generate_prefix_variation_poc(package_name, scheme, output_dir,
     """
     Generate a POC that exploits prefix-based redirect_uri validation.
 
-    Case Study 1 from Djini.ai article: the AS registered
+    Prefix-validation bypass: the authorization server registers
       com.example.app://callback/com.example.app
     and validates by prefix, so an attacker submits
       com.example.app://callback/com.attacker.poc
     which passes the prefix check. The rogue app registers an intent-filter
-    with android:path="/callback/com.attacker.poc" — a more-specific match
-    than the victim app's filter — so Android routes the redirect without
+    with android:path="/callback/com.attacker.poc" - a more-specific match
+    than the victim app's filter - so Android routes the redirect without
     a chooser dialog.
 
     Two POC variants are generated:
-      path_suffix  — appends /com.poc.prefixtest to the registered path
-      path_dotdot  — appends /../../com.poc.prefixtest (traversal variation)
+      path_suffix - appends /com.poc.prefixtest to the registered path
+      path_dotdot - appends /../../com.poc.prefixtest (traversal variation)
     """
     safe_name = re.sub(r'[^a-zA-Z0-9]', '_', scheme)
     poc_dir = os.path.join(output_dir, f'poc_prefix_{safe_name}')
@@ -5097,7 +5152,7 @@ def generate_prefix_variation_poc(package_name, scheme, output_dir,
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Variant A: suffix path — more specific than victim filter -->
+            <!-- Variant A: suffix path - more specific than victim filter -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -5208,7 +5263,7 @@ public class PrefixCatcherActivity extends Activity {{
 
         if (error != null) {{
             log("[!] Error: " + error + " - " + data.getQueryParameter("error_description"));
-            log("[!] AS likely validates redirect_uri strictly — try the other variant");
+            log("[!] AS likely validates redirect_uri strictly - try the other variant");
             return;
         }}
 
@@ -5279,8 +5334,8 @@ def scan_apk_for_providers(apk_path):
     
     CRITICAL: if androguard successfully parses the manifest and finds
     nothing, that is the final answer. Do NOT fall through to v1 string
-    extraction -- that's where all false positives come from (Transferwise
-    VPN packages, Asana MSAL strings, Ecwid social SDK refs, etc).
+    extraction -- that is where false positives come from (VPN/root-detection
+    package lists, MSAL strings, third-party social SDK refs, etc).
     """
     # === PRIMARY: Androguard structural parse ===
     try:
@@ -5396,43 +5451,22 @@ def find_aes_keys_androguard(apk_file, package_name):
     _silence_androguard_logs()
     out = []
     try:
-        from androguard.misc import AnalyzeAPK
+        from androguard.core.apk import APK
     except Exception:
         return out
     try:
-        from androguard.core.dex import Operand
+        from androguard.core.dex import DEX, Operand
     except Exception:
         try:
+            from androguard.core.bytecodes.dvm import DalvikVMFormat as DEX
             from androguard.core.bytecodes.dvm import Operand
         except Exception:
             return out
-    try:
-        _a, _d, dx = AnalyzeAPK(apk_file)
-    except Exception:
-        return out
 
     SKS = 'Ljavax/crypto/spec/SecretKeySpec;'
     IVS = 'Ljavax/crypto/spec/IvParameterSpec;'
     CIP = 'Ljavax/crypto/Cipher;'
     INTC = ('const/4', 'const/16', 'const', 'const/high16')
-
-    def _callers(classname, methodname):
-        seen = set()
-        try:
-            it = dx.find_methods(classname=re.escape(classname),
-                                 methodname=re.escape(methodname))
-        except Exception:
-            return seen
-        for ma in it:
-            try:
-                xf = ma.get_xref_from()
-            except Exception:
-                continue
-            for ref in xf:
-                cm = ref[1] if len(ref) >= 2 else None
-                if cm is not None:
-                    seen.add(cm)
-        return seen
 
     def _analyze(em):
         reg = {}
@@ -5548,34 +5582,65 @@ def find_aes_keys_androguard(apk_file, package_name):
             'ADB Command': 'N/A',
         }
 
-    targets = _callers(SKS, '<init>') | _callers(IVS, '<init>')
     dedup = set()
-    for cm in targets:
+    try:
+        apk = APK(apk_file)
+        dex_blobs = list(apk.get_all_dex())
+    except Exception:
+        return out
+    for _blob in dex_blobs:
         try:
-            em = cm.get_method()
-            fnd, transform = _analyze(em)
+            dex = DEX(_blob)
         except Exception:
             continue
-        if not fnd:
+        # Skip whole DEX files that never reference the crypto types. The type
+        # descriptors live in the string pool, so this membership test lets us
+        # skip the huge non-crypto dexes of large apps without decoding a single
+        # method. This is what keeps giant multi-dex APKs (Audible, Booking, ...)
+        # under the timeout: we never build a cross-reference graph and we never
+        # touch a dex that has no SecretKeySpec/IvParameterSpec in it.
+        try:
+            pool = set(dex.get_strings())
+        except Exception:
+            pool = set()
+        if (SKS not in pool) and (IVS not in pool):
             continue
         try:
-            cls_desc = em.get_class_name()
-            meth = em.get_name()
+            classes = dex.get_classes()
         except Exception:
             continue
-        for kind, val, algo in fnd:
-            if not val or val[0] != 'kb':
+        for _c in classes:
+            try:
+                methods = _c.get_methods()
+            except Exception:
                 continue
-            raw = val[1]
-            via = val[2] if len(val) > 2 else 'literal'
-            d = _emit(kind, raw, algo, transform, cls_desc, meth, via)
-            if d is None:
-                continue
-            sig = (d['Issue Type'], raw, d['Component'])
-            if sig in dedup:
-                continue
-            dedup.add(sig)
-            out.append(d)
+            for em in methods:
+                try:
+                    if em.get_code() is None:
+                        continue
+                    fnd, transform = _analyze(em)
+                except Exception:
+                    continue
+                if not fnd:
+                    continue
+                try:
+                    cls_desc = em.get_class_name()
+                    meth = em.get_name()
+                except Exception:
+                    continue
+                for kind, val, algo in fnd:
+                    if not val or val[0] != 'kb':
+                        continue
+                    raw = val[1]
+                    via = val[2] if len(val) > 2 else 'literal'
+                    d = _emit(kind, raw, algo, transform, cls_desc, meth, via)
+                    if d is None:
+                        continue
+                    sig = (d['Issue Type'], raw, d['Component'])
+                    if sig in dedup:
+                        continue
+                    dedup.add(sig)
+                    out.append(d)
     return out
 
 
@@ -5593,7 +5658,7 @@ def _oauth_probe_cmd(scheme, host, path):
 
 def run_oauth_scan(apk_path, package_name=None, gen_poc=False, poc_root=None):
     """
-    Baked-in OAuth scheme-hijack scan (engine ported from bloodOath_active).
+    Baked-in OAuth scheme-hijack scan.
 
     Detection ALWAYS runs. Buildable Android PoC projects are generated only
     when gen_poc is True. Returns a list of pSlip vuln dicts. Never raises -
@@ -5855,9 +5920,18 @@ def main():
     # ------------------------------------------------------------------
     # Locate APKs (expands .xapk / .apks / .apkm containers)
     # ------------------------------------------------------------------
+    _sweep_stale_temp()        # reclaim leaked extraction dirs from prior crashed runs
     _container_root = [None]   # holder; set if any container is expanded
     apk_paths = gather_apk_inputs(argument, _container_root)
     container_root = _container_root[0]
+    if container_root:
+        # Crash-safe cleanup: the end-of-run _rmtree is skipped if anything
+        # between here and there raises (a crashed worker, a disk-full write).
+        # atexit runs on normal interpreter shutdown including after an
+        # unhandled exception, so the extraction dir is removed either way and
+        # never leaks gigabytes of extracted APKs into %TEMP%.
+        import atexit
+        atexit.register(_rmtree, container_root)
     if apk_paths is None:
         print(f"{RED}Error: Invalid APK, container (.xapk/.apks/.apkm), or directory.{RESET}")
         print_help()
