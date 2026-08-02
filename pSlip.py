@@ -473,7 +473,7 @@ BANNER = f"""
 ██║     ███████║███████╗██║██║     
 ╚═╝     ╚══════╝╚═╝╚═╝                                                  
 {RESET}{BOLD}
-Version 1.3.5 | https://actuator.sh/
+Version 1.4.0 | https://actuator.sh/
 {RESET}
 """
 
@@ -2065,6 +2065,127 @@ def format_category_summary_table(cat_name, vulns):
     return html
 
             
+# ----------------------------------------------------------------------
+# Report artifacts: structured key material / identifiers pulled out of a
+# finding's free-text Details so the HTML report can table them, search
+# them, and export them (CSV/JSON) without re-parsing prose in the browser.
+# Parsing lives here (Python) because the Details format differs per
+# producer: the jadx path emits "Hex: <h>", the androguard DEX path emits
+# "... (hex <h>). algorithm=AES; cipher=AES/CBC/PKCS5Padding ...".
+# ----------------------------------------------------------------------
+_ART_HEX_RE = re.compile(r'hex[:=]?\s*([0-9a-fA-F]{8,})', re.IGNORECASE)
+_ART_ALGO_RE = re.compile(r'algorithm=([^;.\s]+)', re.IGNORECASE)
+_ART_CIPHER_RE = re.compile(r'cipher=([^;\s]+)', re.IGNORECASE)
+_ART_SEGMENT_RE = re.compile(r'Segment write key detected:\s*(\S+)')
+_ART_CLIENT_ID_RE = re.compile(r'client_id=(\S+?)(?:[\s,]|\.\s|$)')
+_ART_SECRET_RE = re.compile(r'recovered:\s*([^)]+)\)')
+_ART_SCHEME_RE = re.compile(r'scheme=([^\s\]]+)')
+
+
+def _artifact_kind(issue_type):
+    it = (issue_type or '').lower()
+    if 'aes key' in it:
+        return 'aes-key'
+    if 'des key' in it:
+        return 'des-key'
+    if 'hardcoded iv' in it:
+        return 'iv'
+    if 'segment write key' in it:
+        return 'segment-write-key'
+    if it.startswith('oauth'):
+        return 'oauth'
+    return ''
+
+
+def extract_finding_artifacts(v):
+    """Structured artifacts for one finding dict.
+
+    Returns a list of dicts:
+      kind    aes-key | des-key | iv | segment-write-key | oauth-client-id |
+              oauth-client-secret
+      algo    AES / DES / IV / provider name ('' when unknown)
+      value   the primary string form (hex for byte keys)
+      hex     lowercase hex when the artifact is bytes, else ''
+      ascii   ASCII rendering when every byte is printable, else ''
+      b64     base64 of the bytes when the artifact is bytes, else ''
+      length  byte length for byte artifacts, character length otherwise
+      redacted  True when the source Details only carried a redacted value
+
+    Never raises: a finding that does not parse simply yields [].
+    """
+    import base64 as _b64
+    out = []
+    try:
+        issue = v.get('Issue Type') or ''
+        details = v.get('Details') or ''
+        kind = _artifact_kind(issue)
+        if not kind:
+            return out
+
+        if kind in ('aes-key', 'des-key', 'iv'):
+            m = _ART_ALGO_RE.search(details)
+            algo = m.group(1) if m else {'aes-key': 'AES', 'des-key': 'DES', 'iv': 'IV'}[kind]
+            cm = _ART_CIPHER_RE.search(details)
+            cipher = cm.group(1).rstrip('.') if cm else ''
+            seen = set()
+            for hm in _ART_HEX_RE.finditer(details):
+                h = hm.group(1).lower()
+                if len(h) % 2:
+                    h = h[:-1]
+                if not h or h in seen:
+                    continue
+                seen.add(h)
+                try:
+                    raw = bytes.fromhex(h)
+                except Exception:
+                    continue
+                asc = raw.decode('ascii') if all(32 <= c < 127 for c in raw) else ''
+                out.append({
+                    'kind': kind, 'algo': algo, 'cipher': cipher,
+                    'value': h, 'hex': h, 'ascii': asc,
+                    'b64': _b64.b64encode(raw).decode('ascii'),
+                    'length': len(raw), 'redacted': False,
+                })
+            return out
+
+        if kind == 'segment-write-key':
+            m = _ART_SEGMENT_RE.search(details)
+            if m:
+                val = m.group(1).rstrip('.,')
+                out.append({
+                    'kind': kind, 'algo': 'Segment', 'cipher': '',
+                    'value': val, 'hex': '', 'ascii': val, 'b64': '',
+                    'length': len(val), 'redacted': False,
+                })
+            return out
+
+        # OAuth: the client_id is the export-worthy identifier; the secret is
+        # only ever present in redacted form in Details (full value stays in
+        # the generated PoC project, not the report).
+        m = _ART_CLIENT_ID_RE.search(details)
+        if m:
+            cid = m.group(1).rstrip('.,')
+            if cid and cid.lower() != 'none':
+                sm = _ART_SCHEME_RE.search(details)
+                out.append({
+                    'kind': 'oauth-client-id',
+                    'algo': (sm.group(1) if sm else ''), 'cipher': '',
+                    'value': cid, 'hex': '', 'ascii': cid, 'b64': '',
+                    'length': len(cid), 'redacted': False,
+                })
+        sm = _ART_SECRET_RE.search(details)
+        if sm:
+            sval = sm.group(1).strip()
+            out.append({
+                'kind': 'oauth-client-secret', 'algo': '', 'cipher': '',
+                'value': sval, 'hex': '', 'ascii': sval, 'b64': '',
+                'length': len(sval), 'redacted': ('REDACTED' in sval),
+            })
+        return out
+    except Exception:
+        return out
+
+
 def generate_html_report(vulnerabilities, permissions, output_file):
     # Normalize severity across all categories before report generation
     normalize_all_vulnerability_severities(vulnerabilities)
@@ -2099,12 +2220,17 @@ def generate_html_report(vulnerabilities, permissions, output_file):
 
     findings = []          # [pkgIdx, sevIdx, issueIdx, component, conf, details, adb]
     per_pkg_counts = {}    # pkgIdx -> [c,h,m,l,i]
+    # Sparse artifact island: [findingIdx, kind, algo, value, hex, ascii, b64, length]
+    # Sparse because only crypto/OAuth findings carry key material, so a 5000-app
+    # run adds a handful of KB rather than a column on every finding.
+    key_rows = []
 
     for v in vulnerabilities:
         p = v.get('package_name') or 'N/A'
         pi = _intern(pkgs, pkg_idx, p)
         si = _sev_index(v.get('Severity', 'Info'))
         ii = _intern(issues, issue_idx, (v.get('Issue Type') or 'N/A'))
+        fi = len(findings)
         findings.append([
             pi, si, ii,
             v.get('Component', '') or 'N/A',
@@ -2112,6 +2238,9 @@ def generate_html_report(vulnerabilities, permissions, output_file):
             v.get('Details', '') or 'N/A',
             v.get('ADB Command', '') or 'N/A',
         ])
+        for a in extract_finding_artifacts(v):
+            key_rows.append([fi, a['kind'], a['algo'], a['value'],
+                             a['hex'], a['ascii'], a['b64'], a['length']])
         c = per_pkg_counts.setdefault(pi, [0, 0, 0, 0, 0])
         c[si] += 1
 
@@ -2123,6 +2252,7 @@ def generate_html_report(vulnerabilities, permissions, output_file):
 
     total_findings = len(findings)
     total_apps = len(pkgs)
+    total_keys = len(key_rows)
 
     # Per-app metadata for the (lightweight) accordion summaries
     def _headline_cls(counts):
@@ -2130,17 +2260,6 @@ def generate_html_report(vulnerabilities, permissions, output_file):
             if counts[i]:
                 return SEV_CLS[i]
         return 'info'
-
-    def _sev_attr(counts):
-        present = [SEV_CLS[i] for i in range(5) if counts[i]]
-        return ' '.join(present) if present else 'info'
-
-    def _badges(counts):
-        out = []
-        for i in range(5):
-            if counts[i]:
-                out.append(f"<span class='cb cb-{SEV_CLS[i]}'>{SEV_LABELS[i][0]}&nbsp;{counts[i]}</span>")
-        return ''.join(out) or "<span class='cb cb-info'>0</span>"
 
     # Order apps: highest severity present first, then name
     app_order = sorted(
@@ -2155,7 +2274,7 @@ def generate_html_report(vulnerabilities, permissions, output_file):
     # HEAD + CSS
     # ------------------------------------------------------------
     H = []
-    H.append("""<!DOCTYPE html>
+    H.append(r"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -2183,24 +2302,36 @@ noscript .nojs { background:#fff3cd; color:#7a5b00; border:1px solid #ffe08a;
 .toolbar { position:sticky; top:46px; z-index:25; display:flex; flex-wrap:wrap;
   align-items:center; gap:8px; padding:10px 0; margin-bottom:6px;
   background:var(--bg); border-bottom:1px solid var(--border); }
-.toolbar .btn { cursor:pointer; border:1px solid var(--border); background:var(--card);
+.toolbar2 { position:static; border-bottom:none; padding:6px 0; }
+.btn { cursor:pointer; border:1px solid var(--border); background:var(--card);
   color:var(--text); padding:6px 12px; border-radius:8px; font-size:13px; font-weight:600; }
-.toolbar .btn:hover { background:var(--primary); color:#fff; border-color:var(--primary); }
+.btn:hover { background:var(--primary); color:#fff; border-color:var(--primary); }
+.btn.sm { padding:4px 9px; font-size:12px; }
 .toolbar .sep { width:1px; height:22px; background:var(--border); margin:0 4px; }
-.toolbar .lbl { font-size:12px; color:var(--muted); }
+.toolbar .lbl, .lbl { font-size:12px; color:var(--muted); }
 .chip { cursor:pointer; border:1px solid var(--border); background:var(--card);
   padding:5px 10px; border-radius:999px; font-size:12px; font-weight:600; }
 .chip.active { background:var(--primary); color:#fff; border-color:var(--primary); }
-.search { flex:1 1 160px; min-width:130px; padding:6px 10px; border:1px solid var(--border);
-  border-radius:8px; background:var(--card); color:var(--text); font-size:13px; }
+.search { flex:1 1 260px; min-width:180px; padding:6px 10px; border:1px solid var(--border);
+  border-radius:8px; background:var(--card); color:var(--text); font-size:13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.sel { padding:6px 8px; border:1px solid var(--border); border-radius:8px;
+  background:var(--card); color:var(--text); font-size:12px; max-width:260px; }
 .hidden { display:none !important; }
+.rowbar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:10px 0 2px; }
+kbd { font-family: ui-monospace, monospace; font-size:11px; border:1px solid var(--border);
+  border-radius:4px; padding:1px 4px; background:var(--card); }
+#qhelp { background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
+  padding:10px 14px; font-size:13px; line-height:1.7; }
+#qhelp code { font-family: ui-monospace, monospace; background:rgba(59,130,246,.12);
+  padding:1px 5px; border-radius:4px; }
 
 details.acc { background:var(--card); border:1px solid var(--border);
   border-radius:var(--radius); margin:12px 0; overflow:hidden; }
 details.acc > summary { list-style:none; cursor:pointer; padding:12px 16px;
   display:flex; align-items:center; gap:10px; user-select:none; }
 details.acc > summary::-webkit-details-marker { display:none; }
-details.acc > summary::before { content:"\\25B8"; color:var(--muted); font-size:12px;
+details.acc > summary::before { content:"\25B8"; color:var(--muted); font-size:12px;
   transition:transform .15s ease; flex:0 0 auto; }
 details.acc[open] > summary::before { transform:rotate(90deg); }
 details.acc > summary:hover { background: rgba(59,130,246,0.06); }
@@ -2220,10 +2351,12 @@ details.acc > summary:hover { background: rgba(59,130,246,0.06); }
 .cb-critical{background:#fee2e2;color:#991b1b;} .cb-high{background:#ffe4e6;color:#9f1239;}
 .cb-medium{background:#fff7ed;color:#9a3412;} .cb-low{background:#ecfdf5;color:#065f46;}
 .cb-info{background:#e0f2fe;color:#075985;}
+.cb-key{background:#ede9fe;color:#5b21b6;}
 @media (prefers-color-scheme: dark){
  .cb-critical{background:rgba(239,68,68,.2);color:#fecaca;} .cb-high{background:rgba(244,63,94,.2);color:#fecdd3;}
  .cb-medium{background:rgba(251,146,60,.2);color:#fed7aa;} .cb-low{background:rgba(16,185,129,.2);color:#bbf7d0;}
  .cb-info{background:rgba(59,130,246,.2);color:#bfdbfe;}
+ .cb-key{background:rgba(139,92,246,.25);color:#ddd6fe;}
 }
 
 .pkg-header { margin:10px 0; padding:12px 14px; background:var(--card);
@@ -2237,8 +2370,10 @@ th { text-align:left; padding:10px 12px; background:var(--border); font-weight:6
 td { padding:10px 12px; border-top:1px solid var(--border); vertical-align:top; }
 tr:hover td { background: rgba(59,130,246,0.08); }
 .findings-table tr { cursor:pointer; }
-.adb-command { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+.adb-command, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size:12px; color:var(--muted); word-break:break-all; white-space:pre-wrap; }
+.keys-table td.mono { color:var(--text); }
+.hit { background:rgba(250,204,21,.45); border-radius:3px; }
 
 .sev { padding:3px 8px; border-radius:999px; font-size:12px; font-weight:600; }
 .sev-critical{background:#fee2e2;color:#991b1b;} .sev-high{background:#ffe4e6;color:#9f1239;}
@@ -2249,6 +2384,13 @@ tr:hover td { background: rgba(59,130,246,0.08); }
  .sev-medium{background:rgba(251,146,60,.2);color:#fed7aa;} .sev-low{background:rgba(16,185,129,.2);color:#bbf7d0;}
  .sev-info{background:rgba(59,130,246,.2);color:#bfdbfe;}
 }
+#ovl { position:fixed; inset:0; background:rgba(15,23,42,.62); z-index:60;
+  display:flex; align-items:center; justify-content:center; padding:20px; }
+#ovl .box { background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
+  width:min(900px,96vw); max-height:86vh; display:flex; flex-direction:column; padding:14px; gap:8px; }
+#ovl textarea { width:100%; flex:1 1 auto; min-height:340px; resize:vertical;
+  font-family: ui-monospace, monospace; font-size:12px; background:var(--bg);
+  color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px; }
 /* Narrow viewports: shrink padding/typography and let any table that still
    exceeds the width scroll horizontally instead of overflowing the page. */
 .acc-body { overflow-x:auto; }
@@ -2268,8 +2410,10 @@ tr:hover td { background: rgba(59,130,246,0.08); }
 """)
 
     from datetime import datetime as _dt
-    H.append("<p class='note'>Generated on " + _dt.now().strftime('%Y-%m-%d %H:%M:%S')
-             + f" &middot; {total_apps} app(s) &middot; {total_findings} finding(s)</p>")
+    _stamp = _dt.now().strftime('%Y-%m-%d %H:%M:%S')
+    H.append("<p class='note'>Generated on " + _stamp
+             + f" &middot; {total_apps} app(s) &middot; {total_findings} finding(s)"
+             + (f" &middot; {total_keys} key artifact(s)" if total_keys else "") + "</p>")
     H.append("<noscript><span class='nojs'>This report renders findings on demand with "
              "JavaScript so it stays fast at thousands of apps. Your browser has JavaScript "
              "disabled, so only the per-app summaries below are visible. Enable JavaScript to "
@@ -2278,7 +2422,7 @@ tr:hover td { background: rgba(59,130,246,0.08); }
     # ------------------------------------------------------------
     # TOOLBAR
     # ------------------------------------------------------------
-    H.append("""
+    H.append(r"""
     <div class="toolbar">
       <button class="btn" onclick="expandShown()">Expand shown</button>
       <button class="btn" onclick="collapseAll()">Collapse all</button>
@@ -2290,7 +2434,33 @@ tr:hover td { background: rgba(59,130,246,0.08); }
       <span class="chip" data-f="medium" onclick="setFilter(this,'medium')">Medium</span>
       <span class="chip" data-f="low" onclick="setFilter(this,'low')">Low</span>
       <span class="chip" data-f="info" onclick="setFilter(this,'info')">Info</span>
-      <input class="search" type="text" placeholder="Filter apps / index by package..." oninput="setSearch(this.value)" />
+      <span class="sep"></span>
+      <select class="sel" id="issue-sel" onchange="setIssue(this.value)" title="Issue type"></select>
+      <input class="search" id="q" type="text" spellcheck="false"
+             placeholder="Search everything -  pkg:com.foo  issue:aes  key:  sev:high  -info  /regex/"
+             oninput="setSearch(this.value)" />
+      <button class="btn" onclick="toggleHelp()" title="Query syntax">?</button>
+    </div>
+    <div class="toolbar toolbar2">
+      <span class="lbl">Export current view:</span>
+      <button class="btn sm" onclick="exportView('csv')">CSV</button>
+      <button class="btn sm" onclick="exportView('json')">JSON</button>
+      <button class="btn sm" onclick="exportView('md')">Markdown</button>
+      <button class="btn sm" onclick="exportView('copy')">Copy</button>
+      <span class="sep"></span>
+      <button class="btn sm" id="btn-keys-view" onclick="exportKeys(false,'csv')">Export keys in view (CSV)</button>
+      <button class="btn sm" id="btn-keys-all" onclick="exportKeys(true,'csv')">Export ALL keys (CSV)</button>
+      <span class="sep"></span>
+      <span class="note" id="match-status" style="margin:0"></span>
+    </div>
+    <div id="qhelp" class="hidden">
+      <b>Query syntax</b> - terms are ANDed, matching is case-insensitive.<br>
+      <code>com.foo</code> plain text searches package, issue, component, confidence, details, ADB command and key material.<br>
+      <code>pkg:com.foo</code> <code>issue:aes</code> <code>comp:MainActivity</code> <code>details:cipher</code>
+      <code>adb:am start</code> <code>sev:high</code> <code>conf:95</code> <code>key:0011aabb</code> scope a term to one field.<br>
+      <code>"two words"</code> quote a phrase. <code>-debuggable</code> excludes. <code>has:key</code> <code>has:adb</code> <code>has:poc</code> presence tests.<br>
+      <code>/^com\.(samsung|sec)\./</code> a term wrapped in slashes is a regex (scopeable too: <code>pkg:/^com\.lge/</code>).<br>
+      <kbd>/</kbd> focuses the box, <kbd>Esc</kbd> clears it.
     </div>
     """)
 
@@ -2314,7 +2484,7 @@ tr:hover td { background: rgba(59,130,246,0.08); }
     # FINDINGS INDEX (JS-rendered, filtered, capped)
     # ------------------------------------------------------------
     H.append(f"""
-    <details class="acc idx-block">
+    <details class="acc idx-block" open>
       <summary>
         <span class="summary-title">Findings Index</span>
         <span class="summary-spacer"></span>
@@ -2330,6 +2500,42 @@ tr:hover td { background: rgba(59,130,246,0.08); }
         </table>
         <div style="margin-top:10px;">
           <button class="btn" id="idx-more" style="display:none;" onclick="indexShowAll()">Render all rows (may be slow)</button>
+        </div>
+      </div>
+    </details>
+    """)
+
+    # ------------------------------------------------------------
+    # KEY MATERIAL (only when the run recovered any)
+    # ------------------------------------------------------------
+    if total_keys:
+        H.append(f"""
+    <details class="acc" id="keys-block">
+      <summary>
+        <span class="summary-title">Key Material &amp; Secrets</span>
+        <span class="summary-spacer"></span>
+        <span class="summary-sub">{total_keys} artifact(s)</span>
+      </summary>
+      <div class="acc-body">
+        <div class="rowbar">
+          <span class="lbl">Kind:</span>
+          <select class="sel" id="key-kind" onchange="renderKeys()"></select>
+          <label class="lbl"><input type="checkbox" id="key-scope" onchange="renderKeys()" checked>
+            limit to current search/filter</label>
+          <span class="sep"></span>
+          <button class="btn sm" onclick="exportKeys('shown','csv')">Export shown (CSV)</button>
+          <button class="btn sm" onclick="exportKeys('shown','json')">JSON</button>
+          <button class="btn sm" onclick="exportKeys('shown','copy')">Copy</button>
+          <button class="btn sm" onclick="exportKeys(true,'csv')">Export ALL {total_keys} (CSV)</button>
+        </div>
+        <div class="note" id="keys-status"></div>
+        <table class="keys-table">
+          <thead><tr><th>App (package)</th><th>Kind</th><th>Algo</th><th>Len</th>
+          <th>Value / hex</th><th>ASCII</th><th>Component</th></tr></thead>
+          <tbody id="keys-body"></tbody>
+        </table>
+        <div style="margin-top:10px;">
+          <button class="btn" id="keys-more" style="display:none;" onclick="keysShowAll()">Render all rows</button>
         </div>
       </div>
     </details>
@@ -2368,7 +2574,8 @@ tr:hover td { background: rgba(59,130,246,0.08); }
     counts_by_pi = [per_pkg_counts.get(pi, [0, 0, 0, 0, 0]) for pi in range(len(pkgs))]
     data = {"pkgs": pkgs, "sevs": SEV_LABELS, "issues": issues,
             "f": findings, "perms": perms_island,
-            "order": app_order, "counts": counts_by_pi}
+            "order": app_order, "counts": counts_by_pi,
+            "keys": key_rows, "gen": _stamp}
     # Embed safely inside a <script>: neutralize sequences that could close the
     # tag or be parsed as HTML. JSON.parse restores the original characters.
     blob = _json.dumps(data, ensure_ascii=False, separators=(',', ':'))
@@ -2379,35 +2586,347 @@ tr:hover td { background: rgba(59,130,246,0.08); }
     # ------------------------------------------------------------
     # CLIENT LOGIC (no external deps; renders on demand)
     # ------------------------------------------------------------
-    H.append("""
+    H.append(r"""
 <script>
 (function(){
   var D = JSON.parse(document.getElementById('pslip-data').textContent);
   var SEVCLS = ['critical','high','medium','low','info'];
   var INDEX_CAP = 1000;       // max index rows rendered before requiring "show all"
-  var EXPAND_CAP = 300;       // max app bodies to open at once
+  var KEYS_CAP  = 1000;       // same, for the key-material table
 
   // group finding-row indices by package index (built once)
-  var byPkg = {};
-  for (var i=0; i<D.f.length; i++){ var pi=D.f[i][0]; (byPkg[pi]||(byPkg[pi]=[])).push(i); }
+  var allByPkg = {};
+  for (var i=0; i<D.f.length; i++){ var pi=D.f[i][0]; (allByPkg[pi]||(allByPkg[pi]=[])).push(i); }
+
+  // key artifacts: [findingIdx, kind, algo, value, hex, ascii, b64, len]
+  var K = D.keys || [];
+  var keysByF = {}, keyText = {}, KINDS = {};
+  for (var k=0; k<K.length; k++){
+    var r=K[k], fi=r[0];
+    (keysByF[fi]||(keysByF[fi]=[])).push(k);
+    keyText[fi] = (keyText[fi]||'') + ' ' + r[1] + ' ' + r[2] + ' ' + r[3] + ' ' + r[4] + ' ' + r[5] + ' ' + r[6];
+    KINDS[r[1]] = (KINDS[r[1]]||0)+1;
+  }
+  for (var fi2 in keyText) keyText[fi2] = keyText[fi2].toLowerCase();
 
   var SIZES = [1000, 500, 100, 50];   // nested grouping units
   var APP_CAP = 500;                  // max app accordions in a filtered view
   var SEVCOLOR = {critical:'#dc2626',high:'#e11d48',medium:'#ea580c',low:'#059669',info:'#0284c7'};
 
-  var state = { sev:'all', q:'' };
-  var indexAll = false, appsAll = false;
+  var state = { sev:'all', issue:'all', q:'', terms:[], ids:[], byPkg:{}, active:false, badRe:false };
+  var indexAll = false, appsAll = false, keysAll = false;
 
   function el(tag, cls, txt){ var e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e; }
   function headlineCls(c){ for(var i=0;i<5;i++){ if(c[i]) return SEVCLS[i]; } return 'info'; }
   function sevAttr(c){ var p=[]; for(var i=0;i<5;i++){ if(c[i]) p.push(SEVCLS[i]); } return p.join(' ')||'info'; }
-  function appendBadges(summaryEl, c){
+  function appendBadges(summaryEl, c, nkeys){
     var any=false;
-    for(var i=0;i<5;i++){ if(c[i]){ var b=el('span','cb cb-'+SEVCLS[i]); b.textContent=D.sevs[i][0]+'\\u00a0'+c[i]; summaryEl.appendChild(b); any=true; } }
+    for(var i=0;i<5;i++){ if(c[i]){ var b=el('span','cb cb-'+SEVCLS[i]); b.textContent=D.sevs[i][0]+'\u00a0'+c[i]; summaryEl.appendChild(b); any=true; } }
     if(!any){ var z=el('span','cb cb-info'); z.textContent='0'; summaryEl.appendChild(z); }
+    if(nkeys){ var kb=el('span','cb cb-key'); kb.textContent='key\u00a0'+nkeys; summaryEl.appendChild(kb); }
   }
   function firstApplicable(n){ for(var i=0;i<SIZES.length;i++){ if(SIZES[i]<n) return SIZES[i]; } return 0; }
   function aggCounts(a,b){ var t=[0,0,0,0,0]; for(var k=a;k<b;k++){ var c=D.counts[D.order[k]]; for(var i=0;i<5;i++) t[i]+=c[i]; } return t; }
+  function pkgKeyCount(pi){ var n=0, rows=allByPkg[pi]||[]; for(var i=0;i<rows.length;i++){ n += (keysByF[rows[i]]||[]).length; } return n; }
+
+  // ------------------------------------------------------------------
+  // QUERY PARSER
+  //   term  := ['-'] [field ':'] (quoted | /regex/ | bare)
+  //   terms are ANDed; an unscoped term matches any searchable field.
+  // ------------------------------------------------------------------
+  var FIELDS = { pkg:'pkg', app:'pkg', 'package':'pkg',
+                 issue:'issue', type:'issue',
+                 comp:'comp', component:'comp',
+                 conf:'conf', confidence:'conf',
+                 details:'details', detail:'details', d:'details',
+                 adb:'adb', cmd:'adb',
+                 sev:'sev', severity:'sev',
+                 key:'key', keys:'key', secret:'key',
+                 has:'has' };
+  var ANYF = ['pkg','issue','comp','conf','details','adb','key'];
+
+  function parseQuery(q){
+    var terms=[], i=0, n=q.length; state.badRe=false;
+    function isSp(c){ return c===' '||c==='\t'||c==='\n'; }
+    while(i<n){
+      while(i<n && isSp(q[i])) i++;
+      if(i>=n) break;
+      var neg=false;
+      if(q[i]==='-' && i+1<n && !isSp(q[i+1])){ neg=true; i++; }
+      var field='any';
+      var m=/^([a-zA-Z_]+):/.exec(q.slice(i));
+      if(m && FIELDS[m[1].toLowerCase()]){ field=FIELDS[m[1].toLowerCase()]; i+=m[0].length; }
+      var buf='';
+      if(q[i]==='"'){
+        i++; while(i<n && q[i]!=='"'){ buf+=q[i++]; } if(i<n) i++;
+        terms.push({f:field,neg:neg,re:null,v:buf.toLowerCase()});
+      } else if(q[i]==='/'){
+        i++; var rb='';
+        while(i<n && q[i]!=='/'){ if(q[i]==='\\' && i+1<n){ rb+=q[i]+q[i+1]; i+=2; continue; } rb+=q[i++]; }
+        if(i<n) i++;
+        var fl=''; while(i<n && /[a-z]/.test(q[i])) fl+=q[i++];
+        if(fl.indexOf('i')<0) fl+='i';
+        var rx=null; try{ rx=new RegExp(rb, fl); }catch(e){ state.badRe=true; }
+        terms.push({f:field,neg:neg,re:rx,v:rb.toLowerCase()});
+      } else {
+        while(i<n && !isSp(q[i])) buf+=q[i++];
+        if(buf) terms.push({f:field,neg:neg,re:null,v:buf.toLowerCase()});
+      }
+    }
+    return terms;
+  }
+
+  function fieldText(f, idx, field){
+    switch(field){
+      case 'pkg': return D.pkgs[f[0]];
+      case 'issue': return D.issues[f[2]];
+      case 'comp': return f[3];
+      case 'conf': return String(f[4]);
+      case 'details': return f[5];
+      case 'adb': return f[6];
+      case 'sev': return D.sevs[f[1]];
+      case 'key': return keyText[idx] || '';
+    }
+    return '';
+  }
+  function hit(t, s){
+    if(!s) return false;
+    if(t.re) return t.re.test(s);
+    return s.toLowerCase().indexOf(t.v) >= 0;
+  }
+  function matchFinding(idx){
+    var f=D.f[idx], ts=state.terms;
+    for(var i=0;i<ts.length;i++){
+      var t=ts[i], ok=false;
+      if(t.f==='has'){
+        if(t.v==='key'||t.v==='keys'||t.v==='secret') ok = !!keysByF[idx];
+        else if(t.v==='adb'||t.v==='cmd') ok = !!(f[6] && f[6]!=='N/A');
+        else if(t.v==='poc') ok = /poc project/i.test(f[5]);
+        else if(t.v==='details') ok = !!(f[5] && f[5]!=='N/A');
+        else ok = false;
+      } else if(t.re===null && t.v===''){
+        ok = true;
+      } else if(t.f==='any'){
+        for(var j=0;j<ANYF.length && !ok;j++) ok = hit(t, fieldText(f, idx, ANYF[j]));
+      } else {
+        ok = hit(t, fieldText(f, idx, t.f));
+      }
+      if(t.neg) ok = !ok;
+      if(!ok) return false;
+    }
+    return true;
+  }
+
+  // Recompute the match set once per interaction; every view reads from it.
+  function recompute(){
+    state.terms = parseQuery(state.q);
+    state.active = (state.sev!=='all' || state.issue!=='all' || state.terms.length>0);
+    var si = SEVCLS.indexOf(state.sev), isu = (state.issue==='all' ? -1 : +state.issue);
+    var ids=[], byP={};
+    for(var i=0;i<D.f.length;i++){
+      var f=D.f[i];
+      if(si>=0 && f[1]!==si) continue;
+      if(isu>=0 && f[2]!==isu) continue;
+      if(state.terms.length && !matchFinding(i)) continue;
+      ids.push(i); (byP[f[0]]||(byP[f[0]]=[])).push(i);
+    }
+    state.ids=ids; state.byPkg=byP;
+    var apps=0; for(var p in byP) apps++;
+    var st=document.getElementById('match-status');
+    if(st){
+      st.textContent = state.active
+        ? (ids.length+' finding(s) in '+apps+' app(s) match'+(state.badRe?' (invalid regex ignored as no-match)':''))
+        : (D.f.length+' finding(s) in '+D.pkgs.length+' app(s)');
+    }
+  }
+  function rowsForApp(pi, all){
+    if(all || !state.active) return (allByPkg[pi]||[]).slice();
+    return (state.byPkg[pi]||[]).slice();
+  }
+
+  // ------------------------------------------------------------------
+  // EXPORT PLUMBING
+  // ------------------------------------------------------------------
+  function csvCell(s){ s = (s==null?'':String(s)); return '"'+s.replace(/"/g,'""')+'"'; }
+  function toCSV(rows){
+    var out=[]; for(var i=0;i<rows.length;i++){
+      var r=rows[i], c=[]; for(var j=0;j<r.length;j++) c.push(csvCell(r[j]));
+      out.push(c.join(','));
+    }
+    return '\ufeff'+out.join('\r\n')+'\r\n';   // BOM so Excel reads UTF-8
+  }
+  function safeName(s){ return String(s||'pslip').replace(/[^A-Za-z0-9._-]+/g,'_').slice(0,80); }
+  function stamp(){ return (D.gen||'').replace(/[^0-9]/g,'').slice(0,14) || 'report'; }
+  function download(name, mime, text){
+    try{
+      var b=new Blob([text],{type:mime+';charset=utf-8'});
+      var u=URL.createObjectURL(b), a=document.createElement('a');
+      a.href=u; a.download=name; document.body.appendChild(a); a.click();
+      setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(u); }, 800);
+      return true;
+    }catch(e){ showText(name+' (download blocked - copy manually)', text); return false; }
+  }
+  function showText(title, text){
+    var old=document.getElementById('ovl'); if(old) old.parentNode.removeChild(old);
+    var ovl=el('div'); ovl.id='ovl';
+    var box=el('div','box');
+    var head=el('div','rowbar');
+    head.appendChild(el('b',null,title));
+    head.appendChild(el('span','summary-spacer'));
+    var cp=el('button','btn sm','Copy'), cl=el('button','btn sm','Close');
+    head.appendChild(cp); head.appendChild(cl); box.appendChild(head);
+    var ta=document.createElement('textarea'); ta.value=text; ta.spellcheck=false; box.appendChild(ta);
+    cp.onclick=function(){ ta.focus(); ta.select();
+      var ok=false; try{ ok=document.execCommand('copy'); }catch(e){}
+      cp.textContent = ok?'Copied':'Press Ctrl+C'; };
+    cl.onclick=function(){ ovl.parentNode.removeChild(ovl); };
+    ovl.onclick=function(e){ if(e.target===ovl) ovl.parentNode.removeChild(ovl); };
+    ovl.appendChild(box); document.body.appendChild(ovl); ta.focus(); ta.select();
+  }
+
+  var F_HDR = ['Package','Severity','Issue Type','Component','Confidence','Details',
+               'ADB Command','Key Kind','Key Algo','Key Len','Key Hex','Key ASCII','Key Base64'];
+  function findingRow(idx){
+    var f=D.f[idx], ks=(keysByF[idx]||[]).map(function(k){ return K[k]; });
+    function j(n){ return ks.map(function(r){ return r[n]; }).join(' | '); }
+    return [D.pkgs[f[0]], D.sevs[f[1]], D.issues[f[2]], f[3], f[4], f[5], f[6],
+            j(1), j(2), j(7), j(4), j(5), j(6)];
+  }
+  function findingObj(idx){
+    var f=D.f[idx], o={ package_name:D.pkgs[f[0]], severity:D.sevs[f[1]],
+      issue_type:D.issues[f[2]], component:f[3], confidence:f[4],
+      details:f[5], adb_command:f[6] };
+    var ks=keysByF[idx];
+    if(ks) o.key_material = ks.map(function(k){ var r=K[k];
+      return { kind:r[1], algo:r[2], value:r[3], hex:r[4], ascii:r[5], base64:r[6], length:r[7] }; });
+    return o;
+  }
+  function toMD(title, ids){
+    var L=['# '+title, '', 'Generated by pSlip on '+(D.gen||'')+'. '+ids.length+' finding(s).', ''];
+    var cur=null;
+    var sorted=ids.slice().sort(function(a,b){ var f=D.f[a], g=D.f[b];
+      var pa=D.pkgs[f[0]].toLowerCase(), pb=D.pkgs[g[0]].toLowerCase();
+      if(pa!==pb) return pa<pb?-1:1;
+      return f[1]-g[1]; });
+    sorted.forEach(function(idx){
+      var f=D.f[idx];
+      if(D.pkgs[f[0]]!==cur){ cur=D.pkgs[f[0]]; L.push('## '+cur, ''); }
+      L.push('### '+D.issues[f[2]]+' ['+D.sevs[f[1]]+']');
+      L.push('');
+      L.push('- Component: `'+f[3]+'`');
+      if(f[4]) L.push('- Confidence: '+f[4]);
+      L.push('- Details: '+f[5]);
+      if(f[6] && f[6]!=='N/A'){ L.push('', '```sh', String(f[6]).replace(/\\n/g,'\n'), '```'); }
+      var ks=keysByF[idx];
+      if(ks){ L.push('', '| kind | algo | len | value |', '|---|---|---|---|');
+        ks.forEach(function(k){ var r=K[k]; L.push('| '+r[1]+' | '+r[2]+' | '+r[7]+' | `'+r[3]+'` |'); }); }
+      L.push('');
+    });
+    return L.join('\n');
+  }
+
+  function exportSet(ids, base, fmt, title){
+    if(!ids.length){ alert('Nothing to export - the current view is empty.'); return; }
+    if(fmt==='csv'){
+      var rows=[F_HDR]; ids.forEach(function(i){ rows.push(findingRow(i)); });
+      download(base+'.csv','text/csv',toCSV(rows));
+    } else if(fmt==='json'){
+      var o={ tool:'pSlip', generated_at:D.gen, scope:title, findings:ids.length,
+              vulnerabilities: ids.map(findingObj) };
+      download(base+'.json','application/json',JSON.stringify(o,null,2));
+    } else if(fmt==='md'){
+      download(base+'.md','text/markdown',toMD(title, ids));
+    } else {
+      showText(title, toMD(title, ids));
+    }
+  }
+  window.exportView=function(fmt){
+    var t = state.active ? 'pSlip - filtered view' : 'pSlip - all findings';
+    exportSet(state.ids, 'pslip_'+stamp()+(state.active?'_filtered':'_all'), fmt, t);
+  };
+  window.exportApp=function(pi, fmt, all){
+    exportSet(rowsForApp(pi, all), 'pslip_'+safeName(D.pkgs[pi]), fmt, D.pkgs[pi]);
+  };
+
+  // ---- key material ----
+  var K_HDR = ['Package','Kind','Algo','Length','Value','Hex','ASCII','Base64',
+               'Component','Severity','Issue Type','Details'];
+  function keyRow(k){
+    var r=K[k], f=D.f[r[0]];
+    return [D.pkgs[f[0]], r[1], r[2], r[7], r[3], r[4], r[5], r[6],
+            f[3], D.sevs[f[1]], D.issues[f[2]], f[5]];
+  }
+  function keyObj(k){
+    var r=K[k], f=D.f[r[0]];
+    return { package_name:D.pkgs[f[0]], kind:r[1], algo:r[2], length:r[7], value:r[3],
+             hex:r[4], ascii:r[5], base64:r[6], component:f[3],
+             severity:D.sevs[f[1]], issue_type:D.issues[f[2]] };
+  }
+  function keySelection(scopeAll){
+    var kindSel=document.getElementById('key-kind');
+    var kind = (scopeAll===true) ? 'all' : (kindSel ? kindSel.value : 'all');
+    var limitBox=document.getElementById('key-scope');
+    var limit = (scopeAll===true) ? false
+              : (scopeAll==='shown' ? (limitBox ? limitBox.checked : false) : state.active);
+    var inView = null;
+    if(limit && state.active){ inView={}; for(var i=0;i<state.ids.length;i++) inView[state.ids[i]]=1; }
+    var out=[];
+    for(var k=0;k<K.length;k++){
+      if(kind!=='all' && K[k][1]!==kind) continue;
+      if(inView && !inView[K[k][0]]) continue;
+      out.push(k);
+    }
+    return out;
+  }
+  window.exportKeys=function(scope, fmt){
+    var sel=keySelection(scope);
+    if(!sel.length){ alert('No key material in this scope.'); return; }
+    var base='pslip_'+stamp()+'_keys'+(scope===true?'_all':'');
+    if(fmt==='json'){
+      download(base+'.json','application/json',
+        JSON.stringify({tool:'pSlip', generated_at:D.gen, artifacts:sel.length,
+                        keys:sel.map(keyObj)}, null, 2));
+    } else if(fmt==='copy'){
+      var rows=[K_HDR]; sel.forEach(function(k){ rows.push(keyRow(k)); });
+      showText('Key material ('+sel.length+')', toCSV(rows).replace('\ufeff',''));
+    } else {
+      var rows2=[K_HDR]; sel.forEach(function(k){ rows2.push(keyRow(k)); });
+      download(base+'.csv','text/csv',toCSV(rows2));
+    }
+  };
+  window.exportAppKeys=function(pi){
+    var rows=[K_HDR], n=0;
+    (allByPkg[pi]||[]).forEach(function(fi){
+      (keysByF[fi]||[]).forEach(function(k){ rows.push(keyRow(k)); n++; });
+    });
+    if(!n){ alert('No key material for this app.'); return; }
+    download('pslip_'+safeName(D.pkgs[pi])+'_keys.csv','text/csv',toCSV(rows));
+  };
+  window.keysShowAll=function(){ keysAll=true; renderKeys(); };
+  window.renderKeys=function(){
+    var tb=document.getElementById('keys-body'); if(!tb) return;
+    var sel=keySelection('shown');
+    tb.textContent='';
+    var cap = keysAll ? sel.length : Math.min(sel.length, KEYS_CAP);
+    var frag=document.createDocumentFragment();
+    for(var i=0;i<cap;i++){
+      var k=sel[i], r=K[k], f=D.f[r[0]], tr=el('tr');
+      tr.appendChild(el('td',null,D.pkgs[f[0]]));
+      tr.appendChild(el('td',null,r[1]));
+      tr.appendChild(el('td',null,r[2]||'-'));
+      tr.appendChild(el('td',null,String(r[7])));
+      tr.appendChild(el('td','mono',r[3]));
+      tr.appendChild(el('td','mono',r[5]||'-'));
+      tr.appendChild(el('td','mono',f[3]));
+      (function(pix){ tr.style.cursor='pointer'; tr.onclick=function(){ gotoApp(pix); }; })(f[0]);
+      frag.appendChild(tr);
+    }
+    tb.appendChild(frag);
+    var st=document.getElementById('keys-status'), more=document.getElementById('keys-more');
+    if(st) st.textContent = (cap<sel.length ? ('Showing '+cap+' of '+sel.length+' artifact(s).')
+                                            : ('Showing '+sel.length+' artifact(s) of '+K.length+' total.'));
+    if(more) more.style.display = (cap<sel.length ? '' : 'none');
+  };
 
   // ---- app accordion (summary only; findings render on open) ----
   function makeApp(pi, prefix){
@@ -2415,14 +2934,41 @@ tr:hover td { background: rgba(59,130,246,0.08); }
     var d=el('details','acc pkg-block h-'+headlineCls(c)); d.id=prefix+pi;
     d.dataset.idx=pi; d.dataset.pkg=name.toLowerCase(); d.dataset.sev=sevAttr(c);
     var s=el('summary'); s.appendChild(el('span','summary-title',name));
-    s.appendChild(el('span','summary-spacer')); appendBadges(s,c); d.appendChild(s);
+    s.appendChild(el('span','summary-spacer')); appendBadges(s,c,pkgKeyCount(pi)); d.appendChild(s);
     var body=el('div','acc-body'); body.dataset.rendered='0'; d.appendChild(body);
     return d;
   }
-  function renderApp(det){
+  function renderApp(det, showAll){
     var body=det.querySelector('.acc-body');
-    if(!body || body.dataset.rendered==='1') return;
-    var pi=+det.dataset.idx, rows=(byPkg[pi]||[]).slice();
+    if(!body) return;
+    if(body.dataset.rendered==='1' && !showAll) return;
+    body.textContent='';
+    var pi=+det.dataset.idx;
+    var all = !!showAll, rows=rowsForApp(pi, all);
+    var total=(allByPkg[pi]||[]).length;
+
+    var bar=el('div','rowbar');
+    bar.appendChild(el('span','lbl','Export '+D.pkgs[pi]+':'));
+    [['CSV','csv'],['JSON','json'],['Markdown','md'],['Copy','copy']].forEach(function(p){
+      var b=el('button','btn sm',p[0]);
+      b.onclick=function(e){ e.stopPropagation(); exportApp(pi,p[1],all); };
+      bar.appendChild(b);
+    });
+    if(pkgKeyCount(pi)){
+      var kb=el('button','btn sm','Keys CSV');
+      kb.onclick=function(e){ e.stopPropagation(); exportAppKeys(pi); };
+      bar.appendChild(kb);
+    }
+    body.appendChild(bar);
+
+    if(state.active && !all){
+      var n=el('div','note');
+      n.textContent='Showing '+rows.length+' of '+total+' finding(s) - filtered. ';
+      var sb=el('button','btn sm','Show all '+total);
+      sb.onclick=function(e){ e.stopPropagation(); renderApp(det, true); };
+      n.appendChild(sb); body.appendChild(n);
+    }
+
     var tbl=el('table','details-table'), thead=el('thead'), htr=el('tr');
     ['Component','Issue Type','Severity','Confidence','Details'].forEach(function(h){ htr.appendChild(el('th',null,h)); });
     thead.appendChild(htr); tbl.appendChild(thead);
@@ -2435,11 +2981,18 @@ tr:hover td { background: rgba(59,130,246,0.08); }
       var sd=el('td'); sd.appendChild(el('span','sev sev-'+SEVCLS[f[1]],D.sevs[f[1]])); tr.appendChild(sd);
       tr.appendChild(el('td',null,f[4]));
       var dtd=el('td',null,f[5]);
+      var ks=keysByF[ri];
+      if(ks){
+        var kt=el('div','mono');
+        kt.textContent = ks.map(function(k){ var r=K[k];
+          return r[1]+(r[2]?'/'+r[2]:'')+' ('+r[7]+'B): '+r[3]+(r[5]?'  ascii="'+r[5]+'"':''); }).join('\n');
+        dtd.appendChild(document.createElement('br')); dtd.appendChild(kt);
+      }
       if(f[6] && f[6]!=='N/A'){
         dtd.appendChild(document.createElement('br'));
         dtd.appendChild(el('strong',null,'ADB Command:'));
         dtd.appendChild(document.createElement('br'));
-        dtd.appendChild(el('div','adb-command', String(f[6]).replace(/\\\\n/g,'\\n')));
+        dtd.appendChild(el('div','adb-command', String(f[6]).replace(/\\n/g,'\n')));
       }
       tr.appendChild(dtd); tb.appendChild(tr);
     });
@@ -2457,7 +3010,7 @@ tr:hover td { background: rgba(59,130,246,0.08); }
     d.style.contentVisibility='auto'; d.style.containIntrinsicSize='auto 52px';
     var s=el('summary'); s.appendChild(el('span','summary-title','Apps '+(a+1)+'-'+b));
     s.appendChild(el('span','summary-spacer'));
-    s.appendChild(el('span','summary-sub',(b-a)+' apps')); appendBadges(s,c); d.appendChild(s);
+    s.appendChild(el('span','summary-sub',(b-a)+' apps')); appendBadges(s,c,0); d.appendChild(s);
     var body=el('div','acc-body'); body.dataset.rendered='0'; d.appendChild(body);
     return d;
   }
@@ -2488,27 +3041,23 @@ tr:hover td { background: rgba(59,130,246,0.08); }
   }, true);
 
   // ---- findings index (filtered + capped) ----
-  function rowMatches(f){
-    if(state.sev!=='all' && SEVCLS[f[1]]!==state.sev) return false;
-    if(state.q && D.pkgs[f[0]].toLowerCase().indexOf(state.q)<0) return false;
-    return true;
-  }
   function renderIndex(){
     var tb=document.getElementById('idx-body'); if(!tb) return;
     tb.textContent='';
-    var ord=[];
-    for(var i=0;i<D.f.length;i++){ if(rowMatches(D.f[i])) ord.push(i); }
+    var ord=state.ids.slice();
     ord.sort(function(a,b){ var d=D.f[a][1]-D.f[b][1]; if(d) return d;
       return D.pkgs[D.f[a][0]].toLowerCase()<D.pkgs[D.f[b][0]].toLowerCase()?-1:1; });
     var total=ord.length, cap= indexAll?total:Math.min(total,INDEX_CAP), frag=document.createDocumentFragment();
     for(var k=0;k<cap;k++){
       var f=D.f[ord[k]], tr=el('tr');
       tr.appendChild(el('td',null,D.pkgs[f[0]]));
-      tr.appendChild(el('td',null,D.issues[f[2]]));
+      var itd=el('td',null,D.issues[f[2]]);
+      if(keysByF[ord[k]]){ var kb=el('span','cb cb-key'); kb.textContent='key'; itd.appendChild(document.createTextNode(' ')); itd.appendChild(kb); }
+      tr.appendChild(itd);
       tr.appendChild(el('td',null,f[3]));
       var sd=el('td'); sd.appendChild(el('span','sev sev-'+SEVCLS[f[1]],D.sevs[f[1]])); tr.appendChild(sd);
       tr.appendChild(el('td',null,f[4]));
-      (function(pi){ tr.onclick=function(){ goto(pi); }; })(f[0]);
+      (function(pi){ tr.onclick=function(){ gotoApp(pi); }; })(f[0]);
       frag.appendChild(tr);
     }
     tb.appendChild(frag);
@@ -2520,12 +3069,8 @@ tr:hover td { background: rgba(59,130,246,0.08); }
 
   // ---- apps view: buckets when unfiltered, flat capped list when filtered ----
   function matchingApps(){
-    var res=[], si=SEVCLS.indexOf(state.sev);
-    for(var i=0;i<D.order.length;i++){ var pi=D.order[i], c=D.counts[pi];
-      if(state.sev!=='all' && !c[si]) continue;
-      if(state.q && D.pkgs[pi].toLowerCase().indexOf(state.q)<0) continue;
-      res.push(pi);
-    }
+    var res=[];
+    for(var i=0;i<D.order.length;i++){ var pi=D.order[i]; if(state.byPkg[pi]) res.push(pi); }
     return res;
   }
   function renderFiltered(){
@@ -2542,7 +3087,7 @@ tr:hover td { background: rgba(59,130,246,0.08); }
     c.appendChild(frag);
   }
   function applyAppsView(){
-    var browse=(state.sev==='all' && !state.q);
+    var browse=!state.active;
     var b=document.getElementById('apps-browse'), f=document.getElementById('apps-filtered'),
         hint=document.getElementById('apps-hint');
     if(!b) return;
@@ -2552,13 +3097,31 @@ tr:hover td { background: rgba(59,130,246,0.08); }
     else { appsAll=false; renderFiltered(); if(hint) hint.textContent=''; }
   }
 
+  function refresh(){
+    recompute(); indexAll=false; keysAll=false;
+    renderIndex(); applyAppsView();
+    if(document.getElementById('keys-body')) renderKeys();
+    var pin=document.getElementById('apps-pinned');
+    if(pin && pin.firstChild){
+      var d=pin.querySelector('.pkg-block');
+      if(d && d.open){ var pb2=d.querySelector('.acc-body'); if(pb2) pb2.dataset.rendered='0'; renderApp(d,false); }
+    }
+  }
+
   window.setFilter=function(elm,sev){
     var chips=document.querySelectorAll('.toolbar .chip');
     for(var i=0;i<chips.length;i++) chips[i].classList.remove('active');
     elm.classList.add('active');
-    state.sev=sev; indexAll=false; renderIndex(); applyAppsView();
+    state.sev=sev; refresh();
   };
-  window.setSearch=function(q){ state.q=(q||'').toLowerCase().trim(); indexAll=false; renderIndex(); applyAppsView(); };
+  window.setIssue=function(v){ state.issue=v; refresh(); };
+  var qTimer=null;
+  window.setSearch=function(q){
+    state.q=(q==null?'':String(q));
+    if(qTimer) clearTimeout(qTimer);
+    qTimer=setTimeout(function(){ qTimer=null; refresh(); }, 160);
+  };
+  window.toggleHelp=function(){ var h=document.getElementById('qhelp'); if(h) h.classList.toggle('hidden'); };
 
   window.expandShown=function(){
     var vis=[].slice.call(document.querySelectorAll('.pkg-block:not(.hidden)'));
@@ -2619,15 +3182,56 @@ tr:hover td { background: rgba(59,130,246,0.08); }
     var d=makeApp(pi,'app-pin-'); c.appendChild(d); d.open=true; renderApp(d);
     if(d.scrollIntoView) d.scrollIntoView();
   }
-  function goto(pi){ try{ location.hash='#app-'+pi; }catch(e){} pinApp(pi); }
-  window.goto=goto;
-  window.addEventListener('hashchange', function(){ var mm=(location.hash||'').match(/^#app-(\\d+)$/); if(mm) pinApp(+mm[1]); });
+  function gotoApp(pi){ try{ location.hash='#app-'+pi; }catch(e){} pinApp(pi); }
+  window.goto=gotoApp; window.gotoApp=gotoApp;
+  window.addEventListener('hashchange', function(){ var mm=(location.hash||'').match(/^#app-(\d+)$/); if(mm) pinApp(+mm[1]); });
+
+  // ---- issue-type + kind selects ----
+  (function(){
+    var sel=document.getElementById('issue-sel');
+    if(sel){
+      var counts={};
+      for(var i=0;i<D.f.length;i++){ counts[D.f[i][2]]=(counts[D.f[i][2]]||0)+1; }
+      var order=Object.keys(counts).map(Number).sort(function(a,b){
+        return D.issues[a].toLowerCase()<D.issues[b].toLowerCase()?-1:1; });
+      var o0=document.createElement('option'); o0.value='all';
+      o0.textContent='All issue types ('+D.issues.length+')'; sel.appendChild(o0);
+      order.forEach(function(ii){
+        var o=document.createElement('option'); o.value=String(ii);
+        o.textContent=D.issues[ii]+'  ('+counts[ii]+')'; sel.appendChild(o);
+      });
+    }
+    if(!K.length){
+      ['btn-keys-view','btn-keys-all'].forEach(function(id){
+        var b=document.getElementById(id); if(b) b.classList.add('hidden'); });
+    }
+    var ks=document.getElementById('key-kind');
+    if(ks){
+      var k0=document.createElement('option'); k0.value='all';
+      k0.textContent='All kinds ('+K.length+')'; ks.appendChild(k0);
+      Object.keys(KINDS).sort().forEach(function(kind){
+        var o=document.createElement('option'); o.value=kind;
+        o.textContent=kind+'  ('+KINDS[kind]+')'; ks.appendChild(o);
+      });
+    }
+  })();
+
+  // ---- keyboard: / focuses search, Esc clears ----
+  document.addEventListener('keydown', function(e){
+    var box=document.getElementById('q'); if(!box) return;
+    var t=e.target, typing=(t && (t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.tagName==='SELECT'));
+    if(e.key==='/' && !typing){ e.preventDefault(); box.focus(); box.select(); }
+    else if(e.key==='Escape'){
+      var ovl=document.getElementById('ovl');
+      if(ovl){ ovl.parentNode.removeChild(ovl); return; }
+      if(t===box){ box.value=''; setSearch(''); box.blur(); }
+    }
+  });
 
   // initial paint
-  renderIndex();
+  refresh();
   buildBrowse();
-  applyAppsView();
-  var mm0=(location.hash||'').match(/^#app-(\\d+)$/); if(mm0) pinApp(+mm0[1]);
+  var mm0=(location.hash||'').match(/^#app-(\d+)$/); if(mm0) pinApp(+mm0[1]);
 })();
 </script>
 """)
@@ -2639,12 +3243,14 @@ tr:hover td { background: rgba(59,130,246,0.08); }
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(html_content)
         print(f"{GREEN}HTML report successfully generated at '{output_file}'.{RESET}")
+        if total_keys:
+            print(f"{GREEN}  {total_keys} key artifact(s) tabled - use the "
+                  f"'Key Material & Secrets' section to export.{RESET}")
     except Exception as e:
         print(f"{RED}Error: Failed to write HTML report to '{output_file}': {e}{RESET}")
 
 
 
-        
 def _apply_category_severity(v):
     """
     Safely override default severity levels based on category rules.
